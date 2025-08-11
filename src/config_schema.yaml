@@ -38,7 +38,7 @@ model_options:
   # Configuration options for the faster-whisper model
   local:
     model:
-      value: base
+      value: base.en
       type: str
       description: "The model to use for transcription. The larger models provide better accuracy but are slower."
       options:
@@ -63,7 +63,7 @@ model_options:
         - cuda
         - cpu
     compute_type:
-      value: default
+      value: float32
       type: str
       description: "The compute type to use for the local Whisper model."
       options:
@@ -87,11 +87,11 @@ model_options:
 # Configuration options for activation and recording
 recording_options:
   activation_key:
-    value: ctrl+shift+space
+    value: ctrl+alt+space
     type: str
     description: "The keyboard shortcut to activate the recording and transcribing process. Separate keys with a '+'."
   input_backend:
-    value: auto
+    value: pynput
     type: str
     description: "The input backend to use for detecting key presses. 'auto' will try to use the best available backend."
     options:
@@ -99,7 +99,7 @@ recording_options:
       - evdev
       - pynput
   recording_mode:
-    value: continuous
+    value: hold_to_record
     type: str
     description: "The recording mode to use. Options include continuous (auto-restart recording after pause in speech until activation key is pressed again), voice_activity_detection (stop recording after pause in speech), press_to_toggle (stop recording when activation key is pressed again), hold_to_record (stop recording when activation key is released)."
     options:

@@ -1,7 +1,8 @@
 import os
 import sys
 import time
-from audioplayer import AudioPlayer
+import sounddevice as sd
+import soundfile as sf
 from pynput.keyboard import Controller
 from PyQt5.QtCore import QObject, QProcess
 from PyQt5.QtGui import QIcon
@@ -42,11 +43,11 @@ class WhisperWriterApp(QObject):
         """
         Initialize the components of the application.
         """
-        self.input_simulator = InputSimulator()
-
         self.key_listener = KeyListener()
         self.key_listener.add_callback("on_activate", self.on_activation)
         self.key_listener.add_callback("on_deactivate", self.on_deactivation)
+
+        self.input_simulator = InputSimulator()
 
         model_options = ConfigManager.get_config_section('model_options')
         model_path = model_options.get('local', {}).get('model_path')
@@ -63,7 +64,14 @@ class WhisperWriterApp(QObject):
             self.status_window = StatusWindow()
 
         self.create_tray_icon()
-        self.main_window.show()
+
+        # Start listening for the activation key immediately
+        try:
+            self.key_listener.start()
+            ak = ConfigManager.get_config_value('recording_options', 'activation_key')
+            ConfigManager.console_print(f'Listening for activation key: {ak}')
+        except Exception as e:
+            print(f'Key listener failed to start: {e}')
 
     def create_tray_icon(self):
         """
@@ -89,10 +97,13 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
-        if self.key_listener:
-            self.key_listener.stop()
-        if self.input_simulator:
-            self.input_simulator.cleanup()
+        # Be robust when settings were not completed yet
+        key_listener = getattr(self, 'key_listener', None)
+        if key_listener:
+            key_listener.stop()
+        input_simulator = getattr(self, 'input_simulator', None)
+        if input_simulator:
+            input_simulator.cleanup()
 
     def exit_app(self):
         """
@@ -169,7 +180,7 @@ class WhisperWriterApp(QObject):
         self.input_simulator.typewrite(result)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
-            AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
+            play_beep()
 
         if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
             self.start_result_thread()
@@ -181,6 +192,19 @@ class WhisperWriterApp(QObject):
         Start the application.
         """
         sys.exit(self.app.exec_())
+
+
+def play_beep():
+    """
+    Play a short WAV beep using sounddevice/soundfile.
+    This avoids system-level GI/GStreamer deps.
+    """
+    try:
+        data, sr = sf.read(os.path.join('assets', 'beep.wav'), dtype='float32')
+        sd.play(data, sr)
+        sd.wait()
+    except Exception as e:
+        print(f'Beep playback failed: {e}')
 
 
 if __name__ == '__main__':
