@@ -2,7 +2,8 @@ import subprocess
 import os
 import signal
 import time
-from pynput.keyboard import Controller as PynputController
+import sys
+from pynput.keyboard import Controller as PynputController, Key as PynputKey
 
 from utils import ConfigManager
 
@@ -116,3 +117,26 @@ class InputSimulator:
         """
         if self.input_method == 'dotool':
             self._terminate_dotool()
+
+    def copy_selection_to_clipboard(self):
+        """
+        Send the system shortcut to copy the current selection to clipboard.
+
+        For simplicity, supports only the 'pynput' input method. On macOS uses
+        CMD+C, otherwise CTRL+C. Returns True if a copy command was sent.
+        """
+        if self.input_method != 'pynput':
+            return False
+
+        modifier_key = PynputKey.cmd if sys.platform == 'darwin' else PynputKey.ctrl
+        try:
+            self.keyboard.press(modifier_key)
+            self.keyboard.press('c')
+            self.keyboard.release('c')
+            self.keyboard.release(modifier_key)
+            # Small delay to allow clipboard to update
+            time.sleep(0.08)
+            ConfigManager.console_print("Sent system copy (Cmd/Ctrl+C) for clipboard context.")
+            return True
+        except Exception:
+            return False

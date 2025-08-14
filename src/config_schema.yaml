@@ -165,3 +165,19 @@ misc:
     value: false
     type: bool
     description: "Set to true to play a noise after the transcription has been typed out."
+
+# OpenRouter settings (used for clipboard-context prompting)
+openrouter:
+  api_key:
+    value: null
+    type: str
+    description: "Your OpenRouter API key. Stored in .env and censored in the UI."
+  model:
+    value: openai/gpt-oss-20b:free
+    type: str
+    description: "Default model to use for OpenRouter prompts."
+    options:
+      - qwen/qwen3-coder:free
+      - deepseek/deepseek-r1:free
+      - openai/gpt-oss-20b:free
+      - moonshotai/kimi-k2:free

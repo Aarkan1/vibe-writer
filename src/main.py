@@ -16,6 +16,8 @@ from ui.status_window import StatusWindow
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
+import pyperclip
+from openrouter_helper import generate_with_openrouter
 
 
 class WhisperWriterApp(QObject):
@@ -175,9 +177,57 @@ class WhisperWriterApp(QObject):
 
     def on_transcription_complete(self, result):
         """
-        When the transcription is complete, type the result and start listening for the activation key again.
+        When the transcription is complete, decide whether to paste it directly or
+        to use the clipboard selection as context for an OpenRouter prompt.
+
+        Flow:
+        1) Save the transcription in a local variable.
+        2) Trigger a system copy (Ctrl/Cmd+C) so selected text goes to clipboard.
+        3) Read clipboard; if it has at least 2 words, call OpenRouter with
+           clipboard as CONTEXT and transcription as INSTRUCTIONS, and type the
+           response. Otherwise, type the transcription directly.
         """
-        self.input_simulator.typewrite(result)
+        transcription_text = result or ''
+
+        # Attempt to copy any current selection so we can optionally use it as context
+        copy_sent = self.input_simulator.copy_selection_to_clipboard()
+
+        # Give the system a brief moment to update the clipboard after copy
+        # Note: very short sleep to avoid user-visible lag while improving reliability
+        time.sleep(0.12)
+
+        # Read clipboard and check if it contains at least 2 words
+        clipboard_text = (pyperclip.paste() or '').strip()
+        if not clipboard_text and hasattr(self, 'app'):
+            # Fallback to Qt clipboard if pyperclip has no access (e.g., sandbox/WSL)
+            try:
+                clipboard_text = (self.app.clipboard().text() or '').strip()
+            except Exception:
+                clipboard_text = ''
+        clipboard_words = [w for w in clipboard_text.split() if w]
+        has_enough_context = len(clipboard_words) >= 2
+
+        # Log diagnostics about the decision path
+        ConfigManager.console_print(
+            f"Transcription complete | len(transcription)={len(transcription_text)} | copy_sent={copy_sent} | "
+            f"len(clipboard)={len(clipboard_text)} | words={len(clipboard_words)} | use_prompt={has_enough_context and bool(transcription_text)}"
+        )
+
+        final_output = ''
+        if has_enough_context and transcription_text:
+            # Use OpenRouter with clipboard context and spoken instructions
+            ConfigManager.console_print("Invoking OpenRouter with clipboard context and spoken instructions...")
+            final_output = generate_with_openrouter(clipboard_text, transcription_text) or ''
+            if final_output:
+                ConfigManager.console_print(f"OpenRouter returned output len={len(final_output)}")
+            else:
+                ConfigManager.console_print("OpenRouter returned empty result. Falling back to plain transcription.")
+
+        if not final_output:
+            # Fallback to plain transcription
+            final_output = transcription_text
+
+        self.input_simulator.typewrite(final_output)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             play_beep()

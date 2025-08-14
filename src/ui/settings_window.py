@@ -113,7 +113,7 @@ class SettingsWindow(BaseWindow):
         elif meta_type == 'str' and 'options' in meta:
             return self.create_combobox(current_value, meta['options'])
         elif meta_type == 'str':
-            return self.create_line_edit(current_value, key)
+            return self.create_line_edit(current_value, key, category, sub_category)
         elif meta_type in ['int', 'float']:
             return self.create_line_edit(str(current_value))
         return None
@@ -131,11 +131,18 @@ class SettingsWindow(BaseWindow):
         widget.setCurrentText(value)
         return widget
 
-    def create_line_edit(self, value, key=None):
+    def create_line_edit(self, value, key=None, category=None, sub_category=None):
         widget = QLineEdit(value)
         if key == 'api_key':
             widget.setEchoMode(QLineEdit.Password)
-            widget.setText(os.getenv('OPENAI_API_KEY') or value)
+            # Prefill from appropriate env var so saved keys reappear masked
+            env_value = None
+            if category == 'model_options' and sub_category == 'api':
+                env_value = os.getenv('OPENAI_API_KEY')
+            elif category == 'openrouter':
+                env_value = os.getenv('OPENROUTER_API_KEY')
+            if env_value:
+                widget.setText(env_value)
         elif key == 'model_path':
             layout = QHBoxLayout()
             layout.addWidget(widget)
@@ -176,13 +183,24 @@ class SettingsWindow(BaseWindow):
         """Save the settings to the config file and .env file."""
         self.iterate_settings(self.save_setting)
 
-        # Save the API key to the .env file
-        api_key = ConfigManager.get_config_value('model_options', 'api', 'api_key') or ''
-        set_key('.env', 'OPENAI_API_KEY', api_key)
-        os.environ['OPENAI_API_KEY'] = api_key
+        # Resolve absolute .env path at project root to ensure consistent writes
+        env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
-        # Remove the API key from the config
+        # Save the OpenAI API key to the .env file
+        openai_api_key = ConfigManager.get_config_value('model_options', 'api', 'api_key') or ''
+        set_key(env_path, 'OPENAI_API_KEY', openai_api_key)
+        os.environ['OPENAI_API_KEY'] = openai_api_key
+
+        # Remove the OpenAI API key from the config
         ConfigManager.set_config_value(None, 'model_options', 'api', 'api_key')
+
+        # Save the OpenRouter API key to the .env file
+        openrouter_api_key = ConfigManager.get_config_value('openrouter', 'api_key') or ''
+        if openrouter_api_key:
+            set_key(env_path, 'OPENROUTER_API_KEY', openrouter_api_key)
+            os.environ['OPENROUTER_API_KEY'] = openrouter_api_key
+            # Remove it from the config file
+            ConfigManager.set_config_value(None, 'openrouter', 'api_key')
 
         ConfigManager.save_config()
         QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
