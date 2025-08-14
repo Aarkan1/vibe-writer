@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Callable, Set
+from typing import Callable, Set, List, Optional, Any
+import threading
 
 from utils import ConfigManager
 
@@ -253,10 +254,22 @@ class KeyChord:
         self.pressed_keys: Set[KeyCode] = set()
 
     def update(self, key: KeyCode, event_type: InputEvent) -> bool:
-        """Update the state of pressed keys and check if the chord is active."""
+        """Update the state of pressed keys and check if the chord is active.
+
+        Only keys that are part of this chord are tracked. When a chord key is
+        released and the chord is no longer active, clear tracked state to
+        force a fresh full combo on the next activation attempt.
+        """
+        if not self._is_key_part_of_chord(key):
+            # Ignore keys that are not part of the configured chord entirely.
+            return self.is_active()
+
         if event_type == InputEvent.KEY_PRESS:
             self.pressed_keys.add(key)
         elif event_type == InputEvent.KEY_RELEASE:
+            # Remove the key. Keep any other still-pressed chord keys so the
+            # user can re-press the final key (e.g., SPACE) without having to
+            # release modifiers.
             self.pressed_keys.discard(key)
 
         return self.is_active()
@@ -271,6 +284,20 @@ class KeyChord:
                 return False
         return True
 
+    def _is_key_part_of_chord(self, key: KeyCode) -> bool:
+        """Return True if the given key is one of the keys required by this chord.
+
+        For modifier groups represented as frozenset, a key belongs if it is a
+        member of that group.
+        """
+        for chord_key in self.keys:
+            if isinstance(chord_key, frozenset):
+                if key in chord_key:
+                    return True
+            elif key == chord_key:
+                return True
+        return False
+
 class KeyListener:
     """
     Manages input backends and listens for specific key combinations.
@@ -281,6 +308,10 @@ class KeyListener:
         self.backends = []
         self.active_backend = None
         self.key_chord = None
+        # Primary keys are the non-modifier keys within the activation chord
+        # (e.g., SPACE in CTRL+ALT+SPACE). We use these to ensure activation
+        # only occurs when the main key is pressed while modifiers are held.
+        self.primary_keys: Set[KeyCode] = set()
         self.callbacks = {
             "on_activate": [],
             "on_deactivate": []
@@ -382,6 +413,9 @@ class KeyListener:
     def set_activation_keys(self, keys: Set[KeyCode]):
         """Set the activation keys for the KeyChord."""
         self.key_chord = KeyChord(keys)
+        # Determine primary (non-modifier) keys from the chord. Any element
+        # that is not a frozenset is considered a primary key.
+        self.primary_keys = {k for k in keys if not isinstance(k, frozenset)}
 
     def on_input_event(self, event):
         """Handle input events and trigger callbacks if the key chord becomes active or inactive."""
@@ -393,8 +427,15 @@ class KeyListener:
         was_active = self.key_chord.is_active()
         is_active = self.key_chord.update(key, event_type)
 
+        # Only trigger activation when the chord transitions to active AND
+        # the current event is a press of a primary (non-modifier) key.
+        # This avoids false activations when only modifiers change state.
         if not was_active and is_active:
-            self._trigger_callbacks("on_activate")
+            if not self.primary_keys:
+                self._trigger_callbacks("on_activate")
+            else:
+                if event_type == InputEvent.KEY_PRESS and key in self.primary_keys:
+                    self._trigger_callbacks("on_activate")
         elif was_active and not is_active:
             self._trigger_callbacks("on_deactivate")
 
@@ -428,7 +469,7 @@ class EvdevBackend(InputBackend):
 
     def __init__(self):
         """Initialize the EvdevBackend."""
-        self.devices: List[evdev.InputDevice] = []
+        self.devices: List[Any] = []
         self.key_map: Optional[dict] = None
         self.evdev = None
         self.thread: Optional[threading.Thread] = None
@@ -788,27 +829,35 @@ class PynputBackend(InputBackend):
             self.mouse_listener.stop()
             self.mouse_listener = None
 
-    def _translate_key_event(self, native_event) -> tuple[KeyCode, InputEvent]:
-        """Translate a pynput event to our internal event representation."""
+    def _translate_key_event(self, native_event) -> tuple[KeyCode | None, InputEvent | None]:
+        """Translate a pynput event to our internal event representation.
+
+        If the key is not mapped, return (None, None) so callers can ignore it.
+        """
         pynput_key, is_press = native_event
-        key_code = self.key_map.get(pynput_key, KeyCode.SPACE)
+        key_code = self.key_map.get(pynput_key)
+        if key_code is None:
+            return None, None
         event_type = InputEvent.KEY_PRESS if is_press else InputEvent.KEY_RELEASE
         return key_code, event_type
 
     def _on_keyboard_press(self, key):
         """Handle keyboard press events."""
-        translated_event = self._translate_key_event((key, True))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((key, True))
+        if key_code is not None and event_type is not None:
+            self.on_input_event((key_code, event_type))
 
     def _on_keyboard_release(self, key):
         """Handle keyboard release events."""
-        translated_event = self._translate_key_event((key, False))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((key, False))
+        if key_code is not None and event_type is not None:
+            self.on_input_event((key_code, event_type))
 
     def _on_mouse_click(self, x, y, button, pressed):
         """Handle mouse click events."""
-        translated_event = self._translate_key_event((button, pressed))
-        self.on_input_event(translated_event)
+        key_code, event_type = self._translate_key_event((button, pressed))
+        if key_code is not None and event_type is not None:
+            self.on_input_event((key_code, event_type))
 
     def _create_key_map(self):
         """Create a mapping from pynput keys to our internal KeyCode enum."""
