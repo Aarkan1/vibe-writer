@@ -1,10 +1,11 @@
 import os
 import sys
 import time
+import threading
 import sounddevice as sd
 import soundfile as sf
 from pynput.keyboard import Controller
-from PyQt5.QtCore import QObject, QProcess, pyqtSignal, Qt, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, QProcess, pyqtSignal, pyqtSlot, Qt, QTimer, QCoreApplication
 from PyQt5.QtGui import QIcon, QGuiApplication
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 
@@ -27,6 +28,9 @@ class WhisperWriterApp(QObject):
     submitInlinePromptSignal = pyqtSignal(str)
     previewInlinePromptSignal = pyqtSignal(str)
     closeInlinePopupSignal = pyqtSignal()
+    # Background completion result signals (emitted from worker threads)
+    inlinePreviewReady = pyqtSignal(str)
+    inlinePromptReady = pyqtSignal(str)
 
     def __init__(self):
         """
@@ -107,6 +111,9 @@ class WhisperWriterApp(QObject):
         self.submitInlinePromptSignal.connect(self._handle_inline_prompt_submit_on_ui)
         self.previewInlinePromptSignal.connect(self._handle_inline_preview_on_ui)
         self.closeInlinePopupSignal.connect(self._close_inline_popup_on_ui)
+        # Connect background completion signals
+        self.inlinePreviewReady.connect(self._on_inline_preview_ready_on_ui)
+        self.inlinePromptReady.connect(self._on_inline_prompt_ready_on_ui)
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
@@ -400,8 +407,11 @@ class WhisperWriterApp(QObject):
         # Keep popup open and show loader while we wait for the result
         if self.prompt_popup:
             self.prompt_popup.set_loading(True)
-        # Start async completion; when done we will close and paste
-        QTimer.singleShot(10, lambda: self._complete_inline_prompt_after_focus(context_text, instructions_text))
+        # Start background completion so UI stays responsive
+        def _worker():
+            final_output = generate_with_openrouter(context_text, instructions_text) or ''
+            self.inlinePromptReady.emit(final_output)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _handle_inline_preview_on_ui(self, instructions_text: str):
         import pyperclip as _pc
@@ -415,8 +425,11 @@ class WhisperWriterApp(QObject):
         # Show loader but keep popup open
         if self.prompt_popup:
             self.prompt_popup.set_loading(True)
-        # Compute preview result and render in popup (no closing/paste)
-        QTimer.singleShot(10, lambda: self._complete_inline_preview(context_text, instructions_text))
+        # Start background preview computation
+        def _worker():
+            final_output = generate_with_openrouter(context_text, instructions_text) or ''
+            self.inlinePreviewReady.emit(final_output)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _complete_inline_preview(self, context_text: str, instructions_text: str):
         final_output = generate_with_openrouter(context_text, instructions_text) or ''
@@ -463,6 +476,42 @@ class WhisperWriterApp(QObject):
     def _close_inline_popup_on_ui(self):
         if self.prompt_popup:
             self.prompt_popup.close()
+        try:
+            self.key_listener.start()
+        except Exception:
+            pass
+
+    @pyqtSlot(str)
+    def _on_inline_preview_ready_on_ui(self, final_output: str):
+        # Render preview result inside the popup and stop the loader
+        if self.prompt_popup:
+            self.prompt_popup.set_loading(False)
+            self.prompt_popup.set_result_text(final_output or '')
+
+    @pyqtSlot(str)
+    def _on_inline_prompt_ready_on_ui(self, final_output: str):
+        # Close popup, place result in clipboard, paste, and resume hotkey listening
+        if self.prompt_popup:
+            self.prompt_popup.set_loading(False)
+            self.prompt_popup.close()
+            try:
+                self.prompt_popup.reset()
+            except Exception:
+                pass
+        # Put result into clipboard and paste
+        try:
+            import pyperclip as _pc
+            _pc.copy(final_output or '')
+        except Exception:
+            pass
+        try:
+            cb = self.app.clipboard()
+            cb.setText(final_output or '')
+        except Exception:
+            pass
+        QTimer.singleShot(50, lambda: self.input_simulator.paste_from_clipboard())
+        if ConfigManager.get_config_value('misc', 'noise_on_completion'):
+            play_beep()
         try:
             self.key_listener.start()
         except Exception:

@@ -104,6 +104,13 @@ class PromptPopup(QWidget):
 		self.result_view.hide()
 		layout.addWidget(self.result_view, stretch=1)
 
+		# Enable click-drag to move the popup (frameless window)
+		# We allow dragging from the background and the hint label so we don't
+		# interfere with text selection inside the editors.
+		self._is_dragging = False
+		self._drag_offset = None
+		self.hint_label.installEventFilter(self)
+
 	def reset(self):
 		"""Clear input and reset UI state so popup opens empty and ready."""
 		self.set_loading(False)
@@ -197,7 +204,70 @@ class PromptPopup(QWidget):
 			if key == Qt.Key_Escape:
 				self.cancelled.emit()
 				return True
+		# Handle drag-to-move from the hint label (safe; does not conflict with typing)
+		if obj is self.hint_label:
+			if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+				self._begin_drag(event.globalPos())
+				return True
+			elif event.type() == QEvent.MouseMove and self._is_dragging and (event.buttons() & Qt.LeftButton):
+				self._perform_drag(event.globalPos())
+				return True
+			elif event.type() == QEvent.MouseButtonRelease and self._is_dragging:
+				self._end_drag()
+				return True
 		return super().eventFilter(obj, event)
+
+	def mousePressEvent(self, event):
+		# Allow dragging from background areas (outside editors)
+		if event.button() == Qt.LeftButton and self._pos_in_draggable_region(event.pos()):
+			self._begin_drag(event.globalPos())
+			return
+		super().mousePressEvent(event)
+
+	def mouseMoveEvent(self, event):
+		if self._is_dragging and (event.buttons() & Qt.LeftButton):
+			self._perform_drag(event.globalPos())
+			return
+		super().mouseMoveEvent(event)
+
+	def mouseReleaseEvent(self, event):
+		if self._is_dragging:
+			self._end_drag()
+			return
+		super().mouseReleaseEvent(event)
+
+	def _pos_in_draggable_region(self, pos):
+		"""Return True if position is not over the editors (so we don't block selection)."""
+		child = self.childAt(pos)
+		if child is None:
+			return True
+		try:
+			if self.text_edit.isAncestorOf(child):
+				return False
+			if self.result_view.isAncestorOf(child):
+				return False
+		except Exception:
+			pass
+		return True
+
+	def _begin_drag(self, global_pos):
+		self._is_dragging = True
+		try:
+			self._drag_offset = global_pos - self.frameGeometry().topLeft()
+		except Exception:
+			self._drag_offset = None
+
+	def _perform_drag(self, global_pos):
+		if not self._is_dragging:
+			return
+		if self._drag_offset is None:
+			self.move(global_pos)
+			return
+		self.move(global_pos - self._drag_offset)
+
+	def _end_drag(self):
+		self._is_dragging = False
+		self._drag_offset = None
 
 	def set_loading(self, is_loading: bool):
 		"""Show/hide loader and optionally disable input while waiting."""
