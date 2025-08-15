@@ -63,7 +63,11 @@ class PromptPopup(QWidget):
 		self.setAttribute(Qt.WA_QuitOnClose, False)
 		self.setWindowModality(Qt.ApplicationModal)
 		self.setFocusPolicy(Qt.StrongFocus)
-		self.setFixedSize(700, 360)
+		# Use logical size with moderate minimum to avoid oversized popup on Windows
+		min_w, min_h = 420, 250
+		w, h = 500, 280
+		self.setMinimumSize(min_w, min_h)
+		self.setFixedSize(max(w, min_w), max(h, min_h))
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(14, 14, 14, 14)

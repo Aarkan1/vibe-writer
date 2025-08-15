@@ -9,6 +9,9 @@ class BaseWindow(QMainWindow):
         Initialize the base window.
         """
         super().__init__()
+        # Store requested logical size for potential DPI adjustments
+        self._logical_width = width
+        self._logical_height = height
         self.initUI(title, width, height)
         self.setWindowPosition()
         self.is_dragging = False
@@ -20,7 +23,14 @@ class BaseWindow(QMainWindow):
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(width, height)
+        # Prefer logical sizes; rely on Qt High-DPI attributes to scale UI.
+        # Set a moderate minimum and cap overly large sizes on high scaling.
+        min_w, min_h = 560, 360
+        max_w, max_h = 900, 720
+        w = max(min(self._logical_width, max_w), min_w)
+        h = max(min(self._logical_height, max_h), min_h)
+        self.setMinimumSize(min_w, min_h)
+        self.setFixedSize(w, h)
 
         self.main_widget = QWidget(self)
         self.main_layout = QVBoxLayout(self.main_widget)

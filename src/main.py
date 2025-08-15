@@ -4,8 +4,8 @@ import time
 import sounddevice as sd
 import soundfile as sf
 from pynput.keyboard import Controller
-from PyQt5.QtCore import QObject, QProcess, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QObject, QProcess, pyqtSignal, Qt, QTimer, QCoreApplication
+from PyQt5.QtGui import QIcon, QGuiApplication
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 
 from key_listener import KeyListener
@@ -32,7 +32,26 @@ class WhisperWriterApp(QObject):
         Initialize the application, opening settings window if no configuration file is found.
         """
         super().__init__()
+        # Enable robust High-DPI scaling before creating the QApplication
+        try:
+            QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+            QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        except Exception:
+            pass
+        # Fallback env toggles for platforms where attributes might be ignored
+        try:
+            os.environ.setdefault('QT_AUTO_SCREEN_SCALE_FACTOR', '1')
+        except Exception:
+            pass
+        # Create the application after setting attributes
         self.app = QApplication(sys.argv)
+        # Improve scaling rounding on Qt 5.15+ (prevents tiny windows on Windows)
+        try:
+            QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+                Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            )
+        except Exception:
+            pass
         # Keep running in tray even if all windows are closed (e.g., popup closed via Esc)
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
