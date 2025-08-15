@@ -25,6 +25,7 @@ class WhisperWriterApp(QObject):
     # Bridge signals to ensure UI actions are executed on the Qt main thread
     showInlinePopupSignal = pyqtSignal()
     submitInlinePromptSignal = pyqtSignal(str)
+    previewInlinePromptSignal = pyqtSignal(str)
     closeInlinePopupSignal = pyqtSignal()
 
     def __init__(self):
@@ -104,6 +105,7 @@ class WhisperWriterApp(QObject):
         # Connect thread-safe UI signals
         self.showInlinePopupSignal.connect(self._show_inline_popup_on_ui)
         self.submitInlinePromptSignal.connect(self._handle_inline_prompt_submit_on_ui)
+        self.previewInlinePromptSignal.connect(self._handle_inline_preview_on_ui)
         self.closeInlinePopupSignal.connect(self._close_inline_popup_on_ui)
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
@@ -300,6 +302,7 @@ class WhisperWriterApp(QObject):
         if self.prompt_popup is None:
             self.prompt_popup = PromptPopup()
             self.prompt_popup.submitted.connect(self.on_inline_prompt_submitted)
+            self.prompt_popup.preview_requested.connect(self.on_inline_preview_requested)
             self.prompt_popup.cancelled.connect(self.on_inline_prompt_cancelled)
 
     def on_activation_inline_prompt(self):
@@ -320,6 +323,10 @@ class WhisperWriterApp(QObject):
         """Handle popup submit: call OpenRouter with clipboard as context, then paste."""
         # Defer to UI thread handler to control focus and window lifetime
         self.submitInlinePromptSignal.emit(instructions_text)
+
+    def on_inline_preview_requested(self, instructions_text: str):
+        """Handle Ctrl+Enter in popup: generate and display result inside popup."""
+        self.previewInlinePromptSignal.emit(instructions_text)
 
     def on_inline_prompt_cancelled(self):
         """Close popup and resume listening without action."""
@@ -395,6 +402,29 @@ class WhisperWriterApp(QObject):
             self.prompt_popup.set_loading(True)
         # Start async completion; when done we will close and paste
         QTimer.singleShot(10, lambda: self._complete_inline_prompt_after_focus(context_text, instructions_text))
+
+    def _handle_inline_preview_on_ui(self, instructions_text: str):
+        import pyperclip as _pc
+        # Read context from clipboard (copied when popup opened)
+        context_text = (_pc.paste() or '').strip()
+        if not context_text and hasattr(self, 'app'):
+            try:
+                context_text = (self.app.clipboard().text() or '').strip()
+            except Exception:
+                context_text = ''
+        # Show loader but keep popup open
+        if self.prompt_popup:
+            self.prompt_popup.set_loading(True)
+        # Compute preview result and render in popup (no closing/paste)
+        QTimer.singleShot(10, lambda: self._complete_inline_preview(context_text, instructions_text))
+
+    def _complete_inline_preview(self, context_text: str, instructions_text: str):
+        final_output = generate_with_openrouter(context_text, instructions_text) or ''
+        if not final_output:
+            final_output = ''
+        if self.prompt_popup:
+            self.prompt_popup.set_loading(False)
+            self.prompt_popup.set_result_text(final_output)
 
     def _complete_inline_prompt_after_focus(self, context_text: str, instructions_text: str):
         final_output = generate_with_openrouter(context_text, instructions_text) or ''

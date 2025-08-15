@@ -1,9 +1,9 @@
-# <img src="./assets/ww-logo.png" alt="WhisperWriter icon" width="25" height="25"> WhisperWriter
+# <img src="./assets/ww-logo.png" alt="Vibe Writer icon" width="25" height="25"> Vibe Writer
 
 ![version](https://img.shields.io/badge/version-1.0.1-blue)
 
 <p align="center">
-    <img src="./assets/ww-demo-image-02.gif" alt="WhisperWriter demo gif" width="340" height="136">
+    <img src="./assets/ww-demo-image-02.gif" alt="Vibe Writer demo gif" width="340" height="136">
 </p>
 
 ### Install dependencies

@@ -53,6 +53,7 @@ class PromptPopup(QWidget):
 	"""
 
 	submitted = pyqtSignal(str)
+	preview_requested = pyqtSignal(str)
 	cancelled = pyqtSignal()
 
 	def __init__(self, parent=None):
@@ -73,7 +74,7 @@ class PromptPopup(QWidget):
 		layout.setContentsMargins(14, 14, 14, 14)
 		layout.setSpacing(8)
 
-		self.hint_label = QLabel("Type instructions. Enter: submit • Shift+Enter: newline • Esc: cancel")
+		self.hint_label = QLabel("Type instructions. Enter: submit • Ctrl+Enter: preview • Shift+Enter: newline • Esc: cancel")
 		self.hint_label.setStyleSheet("color: #B5B9C0; font-size: 12px;")
 		layout.addWidget(self.hint_label)
 
@@ -94,10 +95,21 @@ class PromptPopup(QWidget):
 		self.loader.hide()
 		layout.addWidget(self.loader)
 
+		# Read-only result area shown for Ctrl+Enter previews
+		self.result_view = QTextEdit(self)
+		self.result_view.setReadOnly(True)
+		self.result_view.setStyleSheet(
+			"QTextEdit { background: rgba(255,255,255,0.04); color: #DDE2E7; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; }"
+		)
+		self.result_view.hide()
+		layout.addWidget(self.result_view, stretch=1)
+
 	def reset(self):
 		"""Clear input and reset UI state so popup opens empty and ready."""
 		self.set_loading(False)
 		self.text_edit.clear()
+		self.result_view.clear()
+		self.result_view.hide()
 
 	def show(self):
 		# Center on screen
@@ -144,8 +156,13 @@ class PromptPopup(QWidget):
 				# Insert newline
 				self.text_edit.insertPlainText("\n")
 				return
-			# Do not submit when Ctrl/Alt/Meta are held
-			if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+			# Ctrl+Enter: preview result inside popup
+			if mods & Qt.ControlModifier:
+				text = self.text_edit.toPlainText().strip()
+				self.preview_requested.emit(text)
+				return
+			# Ignore Alt/Meta modified Enter
+			if mods & (Qt.AltModifier | Qt.MetaModifier):
 				return
 			# Submit only for plain Enter
 			text = self.text_edit.toPlainText().strip()
@@ -166,8 +183,13 @@ class PromptPopup(QWidget):
 				if mods & Qt.ShiftModifier:
 					self.text_edit.insertPlainText("\n")
 					return True
-				if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
-					# Ignore modified Enter (no submit)
+				# Ctrl+Enter → preview
+				if mods & Qt.ControlModifier:
+					text = self.text_edit.toPlainText().strip()
+					self.preview_requested.emit(text)
+					return True
+				# Ignore Alt/Meta modified Enter (no submit)
+				if mods & (Qt.AltModifier | Qt.MetaModifier):
 					return True
 				text = self.text_edit.toPlainText().strip()
 				self.submitted.emit(text)
@@ -188,6 +210,18 @@ class PromptPopup(QWidget):
 			self.loader.stop()
 			self.loader.hide()
 			self.text_edit.setDisabled(False)
-			self.hint_label.setText("Type instructions. Enter: submit • Shift+Enter: newline • Esc: cancel")
+			self.hint_label.setText("Type instructions. Enter: submit • Ctrl+Enter: preview • Shift+Enter: newline • Esc: cancel")
+
+	def set_result_text(self, text: str):
+		"""Show the result text in the read-only area below the input."""
+		self.result_view.setPlainText(text or "")
+		self.result_view.show()
+		# Move cursor to start for readability
+		try:
+			cursor = self.result_view.textCursor()
+			cursor.movePosition(cursor.Start)
+			self.result_view.setTextCursor(cursor)
+		except Exception:
+			pass
 
 
