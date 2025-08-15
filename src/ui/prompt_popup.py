@@ -64,11 +64,26 @@ class PromptPopup(QWidget):
 		self.setAttribute(Qt.WA_QuitOnClose, False)
 		self.setWindowModality(Qt.ApplicationModal)
 		self.setFocusPolicy(Qt.StrongFocus)
+		# Enable passive tracking so we can change the cursor near edges for resizing.
+		self.setMouseTracking(True)
 		# Use logical size with moderate minimum to avoid oversized popup on Windows
 		min_w, min_h = 420, 250
 		w, h = 500, 280
 		self.setMinimumSize(min_w, min_h)
-		self.setFixedSize(max(w, min_w), max(h, min_h))
+		# Initial size only; allow user resizing afterward.
+		self.resize(max(w, min_w), max(h, min_h))
+
+		# --- Custom resize state (needed because window is frameless) ---
+		# We implement a simple 8px resize border around the window. We only
+		# start a resize when the pointer is inside this border area.
+		self._RESIZE_MARGIN = 8
+		self._is_resizing = False
+		self._resize_left = False
+		self._resize_right = False
+		self._resize_top = False
+		self._resize_bottom = False
+		self._resize_start_geo = None
+		self._resize_start_mouse = None
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(14, 14, 14, 14)
@@ -218,19 +233,35 @@ class PromptPopup(QWidget):
 		return super().eventFilter(obj, event)
 
 	def mousePressEvent(self, event):
-		# Allow dragging from background areas (outside editors)
-		if event.button() == Qt.LeftButton and self._pos_in_draggable_region(event.pos()):
-			self._begin_drag(event.globalPos())
-			return
+		# Start resize if the cursor is on a resize border.
+		if event.button() == Qt.LeftButton:
+			edges = self._get_resize_edges(event.pos())
+			if any(edges):
+				self._begin_resize(event.globalPos(), edges)
+				return
+			# Otherwise allow dragging from background areas (outside editors)
+			if self._pos_in_draggable_region(event.pos()):
+				self._begin_drag(event.globalPos())
+				return
 		super().mousePressEvent(event)
 
 	def mouseMoveEvent(self, event):
+		# While resizing, update geometry.
+		if self._is_resizing and (event.buttons() & Qt.LeftButton):
+			self._perform_resize(event.globalPos())
+			return
+		# While dragging, move the window.
 		if self._is_dragging and (event.buttons() & Qt.LeftButton):
 			self._perform_drag(event.globalPos())
 			return
+		# Update cursor when hovering near edges (only when not resizing/dragging)
+		self._update_cursor_for_pos(event.pos())
 		super().mouseMoveEvent(event)
 
 	def mouseReleaseEvent(self, event):
+		if self._is_resizing:
+			self._end_resize()
+			return
 		if self._is_dragging:
 			self._end_drag()
 			return
@@ -268,6 +299,81 @@ class PromptPopup(QWidget):
 	def _end_drag(self):
 		self._is_dragging = False
 		self._drag_offset = None
+
+	def _get_resize_edges(self, pos):
+		"""Return a tuple of booleans (left, right, top, bottom) if pos is near edges.
+		We use a fixed margin so the user can grab the frameless window borders.
+		"""
+		rect = self.rect()
+		m = self._RESIZE_MARGIN
+		left = pos.x() <= rect.left() + m
+		right = pos.x() >= rect.right() - m
+		top = pos.y() <= rect.top() + m
+		bottom = pos.y() >= rect.bottom() - m
+		return (left, right, top, bottom)
+
+	def _update_cursor_for_pos(self, pos):
+		"""Update the cursor shape to indicate resizable edges/corners."""
+		left, right, top, bottom = self._get_resize_edges(pos)
+		if (left and top) or (right and bottom):
+			self.setCursor(Qt.SizeFDiagCursor)
+		elif (right and top) or (left and bottom):
+			self.setCursor(Qt.SizeBDiagCursor)
+		elif left or right:
+			self.setCursor(Qt.SizeHorCursor)
+		elif top or bottom:
+			self.setCursor(Qt.SizeVerCursor)
+		else:
+			self.unsetCursor()
+
+	def _begin_resize(self, global_pos, edges):
+		self._is_resizing = True
+		self._resize_left, self._resize_right, self._resize_top, self._resize_bottom = edges
+		self._resize_start_mouse = global_pos
+		self._resize_start_geo = self.geometry()
+
+	def _perform_resize(self, global_pos):
+		if not self._is_resizing:
+			return
+		delta = global_pos - self._resize_start_mouse
+		geo = self._resize_start_geo
+		new_x = geo.x()
+		new_y = geo.y()
+		new_w = geo.width()
+		new_h = geo.height()
+
+		if self._resize_left:
+			new_x = geo.x() + delta.x()
+			new_w = geo.width() - delta.x()
+		if self._resize_right:
+			new_w = geo.width() + delta.x()
+		if self._resize_top:
+			new_y = geo.y() + delta.y()
+			new_h = geo.height() - delta.y()
+		if self._resize_bottom:
+			new_h = geo.height() + delta.y()
+
+		# Clamp to minimum size to avoid inverting
+		min_w = self.minimumWidth()
+		min_h = self.minimumHeight()
+		if new_w < min_w:
+			# Adjust x when clamping left resize so the right edge stays put
+			if self._resize_left:
+				new_x += (new_w - min_w)
+			new_w = min_w
+		if new_h < min_h:
+			if self._resize_top:
+				new_y += (new_h - min_h)
+			new_h = min_h
+
+		self.setGeometry(new_x, new_y, new_w, new_h)
+
+	def _end_resize(self):
+		self._is_resizing = False
+		self._resize_left = self._resize_right = False
+		self._resize_top = self._resize_bottom = False
+		self._resize_start_mouse = None
+		self._resize_start_geo = None
 
 	def set_loading(self, is_loading: bool):
 		"""Show/hide loader and optionally disable input while waiting."""
