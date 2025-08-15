@@ -89,7 +89,15 @@ recording_options:
   activation_key:
     value: ctrl+alt+space
     type: str
-    description: "The keyboard shortcut to activate the recording and transcribing process. Separate keys with a '+'."
+    description: "Hotkey to record and paste the raw transcription immediately. Separate keys with a '+'."
+  prompt_activation_key:
+    value: ctrl+shift+space
+    type: str
+    description: "Hotkey to record, then prompt OpenRouter using clipboard selection as CONTEXT and transcription as INSTRUCTIONS, and paste the response."
+  inline_prompt_key:
+    value: ctrl+shift+alt
+    type: str
+    description: "Hotkey to open an inline prompt popup (no recording). Copies selection to clipboard as CONTEXT, lets you type INSTRUCTIONS, then calls OpenRouter and pastes the result."
   input_backend:
     value: pynput
     type: str
@@ -181,3 +189,18 @@ openrouter:
       - deepseek/deepseek-r1:free
       - openai/gpt-oss-20b:free
       - moonshotai/kimi-k2:free
+  system_prompt:
+    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary."
+    type: text
+    description: "System message for OpenRouter."
+  user_prompt:
+    value: |
+      CONTEXT:
+      {context}
+
+      INSTRUCTIONS:
+      {instructions}
+
+      Please produce the final output now.
+    type: text
+    description: "User message template. Use {context} and {instructions} placeholders."

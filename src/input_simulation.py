@@ -125,18 +125,47 @@ class InputSimulator:
         For simplicity, supports only the 'pynput' input method. On macOS uses
         CMD+C, otherwise CTRL+C. Returns True if a copy command was sent.
         """
+        # Always attempt to send a system copy using pynput, regardless of input_method
+        controller = None
+        try:
+            controller = self.keyboard if self.input_method == 'pynput' else PynputController()
+        except Exception:
+            controller = None
+
+        if controller is None:
+            return False
+
+        modifier_key = PynputKey.cmd if sys.platform == 'darwin' else PynputKey.ctrl
+        try:
+            # Send system copy (Cmd/Ctrl+C)
+            controller.press(modifier_key)
+            controller.press('c')
+            controller.release('c')
+            controller.release(modifier_key)
+            # Small delay to allow clipboard to update
+            time.sleep(0.1)
+            ConfigManager.console_print("Sent system copy (Cmd/Ctrl+C) for clipboard context.")
+            return True
+        except Exception:
+            return False
+
+    def paste_from_clipboard(self):
+        """
+        Send the system shortcut to paste the clipboard contents.
+
+        Uses CMD+V on macOS, CTRL+V otherwise. Returns True if a paste command was sent.
+        """
         if self.input_method != 'pynput':
             return False
 
         modifier_key = PynputKey.cmd if sys.platform == 'darwin' else PynputKey.ctrl
         try:
             self.keyboard.press(modifier_key)
-            self.keyboard.press('c')
-            self.keyboard.release('c')
+            self.keyboard.press('v')
+            self.keyboard.release('v')
             self.keyboard.release(modifier_key)
-            # Small delay to allow clipboard to update
-            time.sleep(0.08)
-            ConfigManager.console_print("Sent system copy (Cmd/Ctrl+C) for clipboard context.")
+            time.sleep(0.06)
+            ConfigManager.console_print("Sent system paste (Cmd/Ctrl+V) for output.")
             return True
         except Exception:
             return False

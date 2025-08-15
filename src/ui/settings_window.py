@@ -3,7 +3,8 @@ import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
-    QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog
+    QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog,
+    QTextEdit
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
 
@@ -114,6 +115,8 @@ class SettingsWindow(BaseWindow):
             return self.create_combobox(current_value, meta['options'])
         elif meta_type == 'str':
             return self.create_line_edit(current_value, key, category, sub_category)
+        elif meta_type == 'text':
+            return self.create_text_edit(current_value)
         elif meta_type in ['int', 'float']:
             return self.create_line_edit(str(current_value))
         return None
@@ -153,6 +156,14 @@ class SettingsWindow(BaseWindow):
             container = QWidget()
             container.setLayout(layout)
             return container
+        return widget
+
+    def create_text_edit(self, value):
+        """Create a multi-line text area for long prompt templates."""
+        widget = QTextEdit()
+        widget.setPlainText(str(value) if value is not None else '')
+        widget.setAcceptRichText(False)
+        widget.setMinimumHeight(120)
         return widget
 
     def create_help_button(self, description):
@@ -240,6 +251,8 @@ class SettingsWindow(BaseWindow):
             widget.setCurrentText(value)
         elif isinstance(widget, QLineEdit):
             widget.setText(str(value) if value is not None else '')
+        elif isinstance(widget, QTextEdit):
+            widget.setPlainText(str(value) if value is not None else '')
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()
@@ -260,6 +273,9 @@ class SettingsWindow(BaseWindow):
                 return float(text) if text else None
             else:
                 return text or None
+        elif isinstance(widget, QTextEdit):
+            text = widget.toPlainText()
+            return text or None
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()

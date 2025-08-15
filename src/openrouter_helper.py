@@ -38,22 +38,33 @@ def generate_with_openrouter(context_text: str, instructions_text: str, model: O
         return ''
 
     try:
+        # Pull prompts from config, falling back to previous defaults
+        system_prompt = (
+            ConfigManager.get_config_value('openrouter', 'system_prompt')
+            or 'You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary.'
+        )
+        user_template = (
+            ConfigManager.get_config_value('openrouter', 'user_prompt')
+            or (
+                'CONTEXT:\n{context}\n\n'
+                'INSTRUCTIONS:\n{instructions}\n\n'
+                'Please produce the final output now.'
+            )
+        )
+        try:
+            user_content = user_template.format(context=context_text, instructions=instructions_text)
+        except Exception:
+            # On bad templating, degrade gracefully by concatenation
+            user_content = f'CONTEXT:\n{context_text}\n\nINSTRUCTIONS:\n{instructions_text}\n\nPlease produce the final output now.'
+
         messages = [
             {
                 'role': 'system',
-                'content': (
-                    'You are a precise text-transformation assistant. '
-                    'Follow the instructions exactly, using the provided context. '
-                    'Return only the final result without extra commentary.'
-                )
+                'content': system_prompt,
             },
             {
                 'role': 'user',
-                'content': (
-                    f'CONTEXT:\n{context_text}\n\n'
-                    f'INSTRUCTIONS:\n{instructions_text}\n\n'
-                    'Please produce the final output now.'
-                )
+                'content': user_content,
             }
         ]
 

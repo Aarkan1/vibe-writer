@@ -307,14 +307,23 @@ class KeyListener:
         """Initialize the KeyListener with backends and activation keys."""
         self.backends = []
         self.active_backend = None
+        # Normal transcription chord
         self.key_chord = None
-        # Primary keys are the non-modifier keys within the activation chord
-        # (e.g., SPACE in CTRL+ALT+SPACE). We use these to ensure activation
-        # only occurs when the main key is pressed while modifiers are held.
         self.primary_keys: Set[KeyCode] = set()
+        # Prompt chord
+        self.key_chord_prompt = None
+        self.primary_keys_prompt: Set[KeyCode] = set()
+        # Inline prompt chord (popup-only, no recording)
+        self.key_chord_inline = None
+        self.primary_keys_inline: Set[KeyCode] = set()
+        # Callback registry
         self.callbacks = {
             "on_activate": [],
-            "on_deactivate": []
+            "on_deactivate": [],
+            "on_activate_prompt": [],
+            "on_deactivate_prompt": [],
+            "on_activate_inline_prompt": [],
+            "on_deactivate_inline_prompt": []
         }
         self.load_activation_keys()
         self.initialize_backends()
@@ -383,10 +392,19 @@ class KeyListener:
             self.active_backend.stop()
 
     def load_activation_keys(self):
-        """Load activation keys from configuration."""
-        key_combination = ConfigManager.get_config_value('recording_options', 'activation_key')
+        """Load activation keys from configuration (normal and prompt)."""
+        # Normal
+        key_combination = ConfigManager.get_config_value('recording_options', 'activation_key') or ''
         keys = self.parse_key_combination(key_combination)
         self.set_activation_keys(keys)
+        # Prompt
+        prompt_combination = ConfigManager.get_config_value('recording_options', 'prompt_activation_key') or ''
+        prompt_keys = self.parse_key_combination(prompt_combination)
+        self.set_prompt_activation_keys(prompt_keys)
+        # Inline prompt (popup-only)
+        inline_combination = ConfigManager.get_config_value('recording_options', 'inline_prompt_key') or ''
+        inline_keys = self.parse_key_combination(inline_combination)
+        self.set_inline_activation_keys(inline_keys)
 
     def parse_key_combination(self, combination_string: str) -> Set[KeyCode | frozenset[KeyCode]]:
         """Parse a string representation of key combination into a set of KeyCodes."""
@@ -417,26 +435,67 @@ class KeyListener:
         # that is not a frozenset is considered a primary key.
         self.primary_keys = {k for k in keys if not isinstance(k, frozenset)}
 
+    def set_prompt_activation_keys(self, keys: Set[KeyCode]):
+        """Set the activation keys for the prompt KeyChord."""
+        self.key_chord_prompt = KeyChord(keys)
+        self.primary_keys_prompt = {k for k in keys if not isinstance(k, frozenset)}
+
+    def set_inline_activation_keys(self, keys: Set[KeyCode]):
+        """Set the activation keys for the inline prompt (popup) KeyChord."""
+        self.key_chord_inline = KeyChord(keys)
+        self.primary_keys_inline = {k for k in keys if not isinstance(k, frozenset)}
+
     def on_input_event(self, event):
-        """Handle input events and trigger callbacks if the key chord becomes active or inactive."""
-        if not self.key_chord or not self.active_backend:
+        """Handle input events and trigger callbacks for normal or prompt chords."""
+        if not self.active_backend:
             return
 
         key, event_type = event
 
-        was_active = self.key_chord.is_active()
-        is_active = self.key_chord.update(key, event_type)
+        # Track previous states
+        was_active_normal = self.key_chord.is_active() if self.key_chord else False
+        was_active_prompt = self.key_chord_prompt.is_active() if self.key_chord_prompt else False
+        was_active_inline = self.key_chord_inline.is_active() if self.key_chord_inline else False
 
-        # Only trigger activation when the chord transitions to active AND
-        # the current event is a press of a primary (non-modifier) key.
-        # This avoids false activations when only modifiers change state.
-        if not was_active and is_active:
-            if not self.primary_keys:
-                self._trigger_callbacks("on_activate")
-            else:
-                if event_type == InputEvent.KEY_PRESS and key in self.primary_keys:
-                    self._trigger_callbacks("on_activate")
-        elif was_active and not is_active:
+        # Update chords with this event
+        is_active_normal = self.key_chord.update(key, event_type) if self.key_chord else False
+        is_active_prompt = self.key_chord_prompt.update(key, event_type) if self.key_chord_prompt else False
+        is_active_inline = self.key_chord_inline.update(key, event_type) if self.key_chord_inline else False
+
+        # Highest priority: inline prompt (popup-only)
+        activated_inline = (not was_active_inline and is_active_inline and (
+            not self.primary_keys_inline or (event_type == InputEvent.KEY_PRESS and key in self.primary_keys_inline)
+        ))
+        if activated_inline:
+            self._trigger_callbacks("on_activate_inline_prompt")
+            return
+
+        deactivated_inline = (was_active_inline and not is_active_inline)
+        if deactivated_inline:
+            self._trigger_callbacks("on_deactivate_inline_prompt")
+
+        # Prioritize prompt activation if both would trigger simultaneously
+        activated_prompt = (not was_active_prompt and is_active_prompt and (
+            not self.primary_keys_prompt or (event_type == InputEvent.KEY_PRESS and key in self.primary_keys_prompt)
+        ))
+        if activated_prompt:
+            self._trigger_callbacks("on_activate_prompt")
+            return
+
+        deactivated_prompt = (was_active_prompt and not is_active_prompt)
+        if deactivated_prompt:
+            self._trigger_callbacks("on_deactivate_prompt")
+            # Do not return; normal chord might also change state separately
+
+        activated_normal = (not was_active_normal and is_active_normal and (
+            not self.primary_keys or (event_type == InputEvent.KEY_PRESS and key in self.primary_keys)
+        ))
+        if activated_normal:
+            self._trigger_callbacks("on_activate")
+            return
+
+        deactivated_normal = (was_active_normal and not is_active_normal)
+        if deactivated_normal:
             self._trigger_callbacks("on_deactivate")
 
     def add_callback(self, event: str, callback: Callable):
