@@ -126,6 +126,8 @@ class PromptPopup(QWidget):
 		self._drag_offset = None
 		self.hint_label.installEventFilter(self)
 
+		# No global outside-click filter; closing is handled on deactivate only
+
 	def reset(self):
 		"""Clear input and reset UI state so popup opens empty and ready."""
 		self.set_loading(False)
@@ -146,6 +148,7 @@ class PromptPopup(QWidget):
 		self.text_edit.setFocus(Qt.ActiveWindowFocusReason)
 		# Some platforms need a brief delay to reliably focus after show
 		QTimer.singleShot(60, self.force_focus)
+		# Closing will be handled when the window deactivates
 
 	def force_focus(self):
 		self.raise_()
@@ -231,6 +234,17 @@ class PromptPopup(QWidget):
 				self._end_drag()
 				return True
 		return super().eventFilter(obj, event)
+
+	def event(self, event):
+		# Close when the window deactivates (user clicks to another app / window)
+		if event.type() == QEvent.WindowDeactivate:
+			self.cancelled.emit()
+		return super().event(event)
+
+	def closeEvent(self, event):
+		super().closeEvent(event)
+
+	# No outside-click filter methods needed
 
 	def mousePressEvent(self, event):
 		# Start resize if the cursor is on a resize border.
