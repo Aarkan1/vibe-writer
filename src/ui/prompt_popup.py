@@ -1,4 +1,5 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
+from utils import ConfigManager
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel
 
@@ -119,6 +120,14 @@ class PromptPopup(QWidget):
 		self.result_view.hide()
 		layout.addWidget(self.result_view, stretch=1)
 
+		# Build rules to suppress accidental spaces when holding hotkey chords
+		# like Ctrl+Alt+Space for recording. We read the configured hotkeys and
+		# if they include SPACE, we store the required modifier mask so that
+		# when those modifiers are held, SPACE keypresses inside the popup text
+		# editor are ignored. This prevents a flood of spaces in the textarea
+		# while the user is holding the recording combo.
+		self._space_suppress_mods = self._build_space_suppression_rules()
+
 		# Enable click-drag to move the popup (frameless window)
 		# We allow dragging from the background and the hint label so we don't
 		# interfere with text selection inside the editors.
@@ -204,6 +213,13 @@ class PromptPopup(QWidget):
 		if obj is self.text_edit and event.type() == QEvent.KeyPress:
 			key = event.key()
 			mods = event.modifiers()
+			# Suppress SPACE while the configured recording chords that use SPACE
+			# are held (e.g., Ctrl+Alt+Space). This avoids inserting spaces into
+			# the popup text area while starting/holding the recording hotkey.
+			if key == Qt.Key_Space:
+				for required in self._space_suppress_mods:
+					if required is not None and (mods & required) == required:
+						return True
 			if key in (Qt.Key_Return, Qt.Key_Enter):
 				if mods & Qt.ShiftModifier:
 					self.text_edit.insertPlainText("\n")
@@ -240,6 +256,48 @@ class PromptPopup(QWidget):
 		if event.type() == QEvent.WindowDeactivate:
 			self.cancelled.emit()
 		return super().event(event)
+
+	def _build_space_suppression_rules(self):
+		"""Compute modifier masks for any configured hotkeys that use SPACE.
+
+		We only suppress SPACE when these modifiers are held, so normal typing of
+		plain spaces still works. Handles both 'activation_key' and
+		'prompt_activation_key'.
+		"""
+		try:
+			ak = ConfigManager.get_config_value('recording_options', 'activation_key') or ''
+			pak = ConfigManager.get_config_value('recording_options', 'prompt_activation_key') or ''
+		except Exception:
+			ak, pak = '', ''
+		mods = []
+		m1 = self._parse_space_combo_to_qt_mods(ak)
+		if m1 is not None:
+			mods.append(m1)
+		m2 = self._parse_space_combo_to_qt_mods(pak)
+		if m2 is not None:
+			mods.append(m2)
+		return mods
+
+	def _parse_space_combo_to_qt_mods(self, combo: str):
+		"""Return Qt modifier mask if combo includes SPACE; otherwise None.
+
+		Recognizes CTRL, ALT, SHIFT, META (and CMD, WIN as META alias).
+		"""
+		if not combo:
+			return None
+		tokens = [t.strip().upper() for t in combo.split('+') if t.strip()]
+		if 'SPACE' not in tokens:
+			return None
+		required = 0
+		if 'CTRL' in tokens:
+			required |= Qt.ControlModifier
+		if 'ALT' in tokens:
+			required |= Qt.AltModifier
+		if 'SHIFT' in tokens:
+			required |= Qt.ShiftModifier
+		if 'META' in tokens or 'CMD' in tokens or 'WIN' in tokens:
+			required |= Qt.MetaModifier
+		return required
 
 	def closeEvent(self, event):
 		super().closeEvent(event)
