@@ -332,7 +332,7 @@ class WhisperWriterApp(QObject):
         self.submitInlinePromptSignal.emit(instructions_text)
 
     def on_inline_preview_requested(self, instructions_text: str):
-        """Handle Ctrl+Enter in popup: generate and display result inside popup."""
+        """Handle Enter in popup: generate and display a preview inside the popup."""
         self.previewInlinePromptSignal.emit(instructions_text)
 
     def on_inline_prompt_cancelled(self):

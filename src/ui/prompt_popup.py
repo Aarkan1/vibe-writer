@@ -48,7 +48,8 @@ class PromptPopup(QWidget):
 	"""
 	Centered dark popup with a text area for inline instructions.
 	- Shift+Enter inserts a newline
-	- Enter submits
+	- Enter previews
+	- Ctrl+Enter pastes
 	- Esc cancels
 	- Uses the same dark rounded theme as the status equalizer
 	"""
@@ -90,7 +91,7 @@ class PromptPopup(QWidget):
 		layout.setContentsMargins(14, 14, 14, 14)
 		layout.setSpacing(8)
 
-		self.hint_label = QLabel("Type instructions. Enter: submit • Ctrl+Enter: preview • Shift+Enter: newline • Esc: cancel")
+		self.hint_label = QLabel("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
 		self.hint_label.setStyleSheet("color: #B5B9C0; font-size: 12px;")
 		layout.addWidget(self.hint_label)
 
@@ -153,7 +154,7 @@ class PromptPopup(QWidget):
 		self.loader.hide()
 		layout.addWidget(self.loader)
 
-		# Read-only result area shown for Ctrl+Enter previews
+		# Read-only result area shown for Enter previews
 		self.result_view = QTextEdit(self)
 		self.result_view.setReadOnly(True)
 		self.result_view.setStyleSheet(
@@ -235,24 +236,24 @@ class PromptPopup(QWidget):
 		painter.drawRoundedRect(rect, radius, radius)
 
 	def keyPressEvent(self, event):
-		# Enter: submit; Shift+Enter: newline; Esc: cancel
+		# Enter: preview; Shift+Enter: newline; Ctrl+Enter: paste; Esc: cancel
 		if event.key() in (Qt.Key_Return, Qt.Key_Enter):
 			mods = event.modifiers()
 			if mods & Qt.ShiftModifier:
 				# Insert newline
 				self.text_edit.insertPlainText("\n")
 				return
-			# Ctrl+Enter: preview result inside popup
+			# Ctrl+Enter: submit/paste
 			if mods & Qt.ControlModifier:
 				text = self.text_edit.toPlainText().strip()
-				self.preview_requested.emit(text)
+				self.submitted.emit(text)
 				return
 			# Ignore Alt/Meta modified Enter
 			if mods & (Qt.AltModifier | Qt.MetaModifier):
 				return
-			# Submit only for plain Enter
+			# Preview for plain Enter
 			text = self.text_edit.toPlainText().strip()
-			self.submitted.emit(text)
+			self.preview_requested.emit(text)
 			return
 		elif event.key() == Qt.Key_Escape:
 			self.cancelled.emit()
@@ -261,7 +262,7 @@ class PromptPopup(QWidget):
 		super().keyPressEvent(event)
 
 	def eventFilter(self, obj, event):
-		# Ensure plain Enter submits even when QTextEdit has focus
+		# Ensure plain Enter previews even when QTextEdit has focus
 		if obj is self.text_edit and event.type() == QEvent.KeyPress:
 			key = event.key()
 			mods = event.modifiers()
@@ -276,16 +277,17 @@ class PromptPopup(QWidget):
 				if mods & Qt.ShiftModifier:
 					self.text_edit.insertPlainText("\n")
 					return True
-				# Ctrl+Enter → preview
+				# Ctrl+Enter → submit/paste
 				if mods & Qt.ControlModifier:
 					text = self.text_edit.toPlainText().strip()
-					self.preview_requested.emit(text)
+					self.submitted.emit(text)
 					return True
-				# Ignore Alt/Meta modified Enter (no submit)
+				# Ignore Alt/Meta modified Enter (no action)
 				if mods & (Qt.AltModifier | Qt.MetaModifier):
 					return True
+				# Plain Enter → preview
 				text = self.text_edit.toPlainText().strip()
-				self.submitted.emit(text)
+				self.preview_requested.emit(text)
 				return True
 			if key == Qt.Key_Escape:
 				self.cancelled.emit()
@@ -517,7 +519,7 @@ class PromptPopup(QWidget):
 			self.loader.stop()
 			self.loader.hide()
 			self.text_edit.setDisabled(False)
-			self.hint_label.setText("Type instructions. Enter: submit • Ctrl+Enter: preview • Shift+Enter: newline • Esc: cancel")
+			self.hint_label.setText("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
 
 	def set_result_text(self, text: str):
 		"""Show the result text in the read-only area below the input."""
