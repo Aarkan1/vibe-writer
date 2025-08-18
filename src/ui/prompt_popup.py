@@ -15,8 +15,8 @@ class TypingIndicatorWidget(QWidget):
 		self._timer.timeout.connect(self._tick)
 		self._phase = 0
 		self._dot_color = QColor('#DDE2E7')
-		self._diameter = 6
-		self._spacing = 6
+		self._diameter = 4
+		self._spacing = 2
 		w = self._diameter * 3 + self._spacing * 2
 		h = self._diameter
 		self.setFixedSize(w, h)
@@ -24,7 +24,8 @@ class TypingIndicatorWidget(QWidget):
 
 	def start(self):
 		if not self._timer.isActive():
-			self._timer.start(260)
+			# animation speed is 150ms
+			self._timer.start(150)
 
 	def stop(self):
 		if self._timer.isActive():
@@ -698,7 +699,7 @@ class PromptPopup(QWidget):
 		bubble = QFrame(container)
 		bubble.setFrameShape(QFrame.NoFrame)
 		# Match clipboard read-only area styling
-		bubble.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: none; border-radius: 8px; }")
+		bubble.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; }")
 		inner = QVBoxLayout(bubble)
 		inner.setContentsMargins(8, 8, 8, 8)
 		inner.setSpacing(4)
@@ -706,7 +707,7 @@ class PromptPopup(QWidget):
 		label.setWordWrap(True)
 		label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 		# Use clipboard view font size and color
-		label.setStyleSheet("QLabel { color: #E8EAED; font-size: 13px; background: transparent; }")
+		label.setStyleSheet("QLabel { color: #E8EAED; font-size: 13px; border: none; background: transparent; }")
 		inner.addWidget(label)
 		if is_user:
 			h.addStretch(1)
