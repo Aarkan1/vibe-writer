@@ -130,7 +130,8 @@ class PromptPopup(QWidget):
 		self.clipboard_view.setReadOnly(True)
 		self.clipboard_view.setAcceptRichText(False)
 		self.clipboard_view.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; }"
+			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; } "
+			+ self._scrollbar_qss()
 		)
 		# Let the inner editor expand within the fixed container and scroll as needed
 		self.clipboard_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -156,7 +157,9 @@ class PromptPopup(QWidget):
 		self.messages_scroll.setWidgetResizable(True)
 		self.messages_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 		# Match chat background to popup background by keeping it transparent (popup paints bg)
-		self.messages_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+		self.messages_scroll.setStyleSheet(
+			"QScrollArea { border: none; background: transparent; } " + self._scrollbar_qss()
+		)
 		self.messages_widget = QWidget(self)
 		self.messages_widget.setStyleSheet("background: transparent;")
 		self.messages_layout = QVBoxLayout(self.messages_widget)
@@ -186,7 +189,8 @@ class PromptPopup(QWidget):
 		self.text_edit = QTextEdit(self)
 		self.text_edit.setPlaceholderText("Write your instructions…")
 		self.text_edit.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; }"
+			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; } "
+			+ self._scrollbar_qss()
 		)
 		self.text_edit.setAcceptRichText(False)
 		self.text_edit.setTabChangesFocus(False)
@@ -738,5 +742,24 @@ class PromptPopup(QWidget):
 				bubble.setMaximumWidth(max_w)
 		except Exception:
 			pass
+
+	def _scrollbar_qss(self) -> str:
+		"""Return QSS rules for scrollbars that match the popup's dark theme.
+
+		This string is appended to widget-specific stylesheets so it only affects
+		the scrollbars within those widgets (QTextEdit, QScrollArea) inside the popup.
+		"""
+		return (
+			"QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
+			"QScrollBar::handle:vertical { background: rgba(255,255,255,0.16); min-height: 24px; border-radius: 5px; }"
+			"QScrollBar::handle:vertical:hover { background: rgba(255,255,255,0.26); }"
+			"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+			"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+			"QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }"
+			"QScrollBar::handle:horizontal { background: rgba(255,255,255,0.16); min-width: 24px; border-radius: 5px; }"
+			"QScrollBar::handle:horizontal:hover { background: rgba(255,255,255,0.26); }"
+			"QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+			"QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }"
+		)
 
 
