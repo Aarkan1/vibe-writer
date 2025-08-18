@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List, Dict
 
 # Minimal OpenAI chat helper using direct HTTP requests.
 # Reads API key from OPENAI_API_KEY.
@@ -10,7 +10,7 @@ from utils import ConfigManager
 from dotenv import load_dotenv
 
 
-def generate_with_openai(context_text: str, instructions_text: str, model: Optional[str] = None) -> str:
+def generate_with_openai(context_text: str, instructions_text: str, model: Optional[str] = None, history_messages: Optional[List[Dict[str, str]]] = None) -> str:
     """
     Call OpenAI with context and instructions and return the assistant's response text.
 
@@ -62,11 +62,22 @@ def generate_with_openai(context_text: str, instructions_text: str, model: Optio
                 'role': 'system',
                 'content': system_prompt,
             },
-            {
-                'role': 'user',
-                'content': user_content,
-            }
         ]
+        # Insert prior chat turns, if any (user/assistant only)
+        if history_messages:
+            try:
+                for m in history_messages:
+                    role = (m.get('role') or '').strip()
+                    content = (m.get('content') or '').strip()
+                    if role in ('user', 'assistant') and content:
+                        messages.append({'role': role, 'content': content})
+            except Exception:
+                pass
+        # Append the current user request constructed from context/instructions
+        messages.append({
+            'role': 'user',
+            'content': user_content,
+        })
 
         headers = {
             'Authorization': f'Bearer {api_key}',
@@ -85,7 +96,7 @@ def generate_with_openai(context_text: str, instructions_text: str, model: Optio
             ConfigManager.console_print('OpenAI: failed to log prompt messages.')
 
         ConfigManager.console_print(
-            f'OpenAI: POST chat/completions model={chosen_model} | ctx_len={len(context_text)} | instr_len={len(instructions_text)}'
+            f'OpenAI: POST chat/completions model={chosen_model} | ctx_len={len(context_text)} | instr_len={len(instructions_text)} | history={len(history_messages or [])}'
         )
         resp = requests.post(
             url='https://api.openai.com/v1/chat/completions',

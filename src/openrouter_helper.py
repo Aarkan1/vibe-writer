@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List, Dict
 
 # Minimal OpenRouter chat helper using direct HTTP requests.
 # Reads API key from OPENROUTER_API_KEY (preferred) or OPENAI_API_KEY.
@@ -10,7 +10,7 @@ from utils import ConfigManager
 from dotenv import load_dotenv
 
 
-def generate_with_openrouter(context_text: str, instructions_text: str, model: Optional[str] = None) -> str:
+def generate_with_openrouter(context_text: str, instructions_text: str, model: Optional[str] = None, history_messages: Optional[List[Dict[str, str]]] = None) -> str:
     """
     Call OpenRouter with context and instructions and return the assistant's response text.
 
@@ -62,11 +62,22 @@ def generate_with_openrouter(context_text: str, instructions_text: str, model: O
                 'role': 'system',
                 'content': system_prompt,
             },
-            {
-                'role': 'user',
-                'content': user_content,
-            }
         ]
+        # Insert prior chat turns, if any (user/assistant only)
+        if history_messages:
+            try:
+                for m in history_messages:
+                    role = (m.get('role') or '').strip()
+                    content = (m.get('content') or '').strip()
+                    if role in ('user', 'assistant') and content:
+                        messages.append({'role': role, 'content': content})
+            except Exception:
+                pass
+        # Append the current user request constructed from context/instructions
+        messages.append({
+            'role': 'user',
+            'content': user_content,
+        })
 
         headers = {
             'Authorization': f'Bearer {api_key}',
@@ -86,7 +97,7 @@ def generate_with_openrouter(context_text: str, instructions_text: str, model: O
             ConfigManager.console_print('OpenRouter: failed to log prompt messages.')
 
         ConfigManager.console_print(
-            f'OpenRouter: POST chat/completions model={chosen_model} | ctx_len={len(context_text)} | instr_len={len(instructions_text)}'
+            f'OpenRouter: POST chat/completions model={chosen_model} | ctx_len={len(context_text)} | instr_len={len(instructions_text)} | history={len(history_messages or [])}'
         )
         resp = requests.post(
             url='https://openrouter.ai/api/v1/chat/completions',

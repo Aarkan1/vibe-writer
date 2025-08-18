@@ -207,6 +207,10 @@ class PromptPopup(QWidget):
 
 		# Track last assistant message for Ctrl+Enter paste
 		self._last_assistant_text = ""
+		# Track chat history for LLM calls. We store a list of
+		# dicts like { 'role': 'user'|'assistant', 'content': str }.
+		# This lets us include past turns in the completion request.
+		self._history_messages = []
 
 		# Build rules to suppress accidental spaces when holding hotkey chords
 		# like Ctrl+Alt+Space for recording. We read the configured hotkeys and
@@ -231,6 +235,8 @@ class PromptPopup(QWidget):
 		self.text_edit.clear()
 		self.clear_messages()
 		self._last_assistant_text = ""
+		# Also clear stored chat history
+		self._history_messages = []
 
 	def show(self):
 		# Center on screen
@@ -631,6 +637,8 @@ class PromptPopup(QWidget):
 
 	def add_user_message(self, text: str):
 		"""Add a right-aligned user message bubble to the chat and scroll to bottom."""
+		# Record in history first so callers can snapshot before/after as needed
+		self._history_messages.append({ 'role': 'user', 'content': text or "" })
 		bubble = self._create_bubble(text or "", is_user=True)
 		self._insert_message_widget(bubble)
 		self._scroll_to_bottom()
@@ -641,6 +649,8 @@ class PromptPopup(QWidget):
 		Also remembers the last assistant text for Ctrl+Enter paste.
 		"""
 		self._last_assistant_text = text or ""
+		# Record in history
+		self._history_messages.append({ 'role': 'assistant', 'content': self._last_assistant_text })
 		bubble = self._create_bubble(self._last_assistant_text, is_user=False)
 		self._insert_message_widget(bubble)
 		self._scroll_to_bottom()
@@ -661,11 +671,20 @@ class PromptPopup(QWidget):
 			if w is not None:
 				self.messages_layout.removeWidget(w)
 				w.setParent(None)
+		# Do not clear history here; reset() controls history lifecycle
 
 	def _insert_message_widget(self, w: QWidget):
 		# Insert before the spacer so spacer remains last
 		index = max(0, self.messages_layout.count() - 1)
 		self.messages_layout.insertWidget(index, w)
+
+	def get_chat_history_messages(self):
+		"""Return a shallow copy of chat history as a list of {role, content}.
+
+		The history includes messages added via add_user_message/add_assistant_message
+		in the order they were added during this popup session.
+		"""
+		return list(self._history_messages)
 
 	def _create_bubble(self, text: str, is_user: bool) -> QWidget:
 		container = QWidget(self.messages_widget)

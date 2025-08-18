@@ -442,7 +442,12 @@ class VibeWriterApp(QObject):
             self.prompt_popup.set_loading(True)
         # Start background completion so UI stays responsive
         def _worker():
-            final_output = generate_with_llm(context_text, instructions_text) or ''
+            # Snapshot chat history to include prior turns in the request
+            try:
+                history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
+            except Exception:
+                history = []
+            final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePromptReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -470,12 +475,21 @@ class VibeWriterApp(QObject):
             self.prompt_popup.set_loading(True)
         # Start background preview computation
         def _worker():
-            final_output = generate_with_llm(context_text, instructions_text) or ''
+            # Include current chat history for better previews
+            try:
+                history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
+            except Exception:
+                history = []
+            final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePreviewReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
 
     def _complete_inline_preview(self, context_text: str, instructions_text: str):
-        final_output = generate_with_llm(context_text, instructions_text) or ''
+        try:
+            history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
+        except Exception:
+            history = []
+        final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
         if not final_output:
             final_output = ''
         if self.prompt_popup:
@@ -483,7 +497,11 @@ class VibeWriterApp(QObject):
             self.prompt_popup.set_result_text(final_output)
 
     def _complete_inline_prompt_after_focus(self, context_text: str, instructions_text: str):
-        final_output = generate_with_llm(context_text, instructions_text) or ''
+        try:
+            history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
+        except Exception:
+            history = []
+        final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
         if not final_output:
             final_output = ''
         # Close popup now so focus returns to previous window
