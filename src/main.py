@@ -22,7 +22,7 @@ import pyperclip
 from llm_helper import generate_with_llm
 
 
-class WhisperWriterApp(QObject):
+class VibeWriterApp(QObject):
     # Bridge signals to ensure UI actions are executed on the Qt main thread
     showInlinePopupSignal = pyqtSignal()
     submitInlinePromptSignal = pyqtSignal(str)
@@ -137,7 +137,7 @@ class WhisperWriterApp(QObject):
 
         tray_menu = QMenu()
 
-        show_action = QAction('WhisperWriter Main Menu', self.app)
+        show_action = QAction('VibeWriter Main Menu', self.app)
         show_action.triggered.connect(self.main_window.show)
         tray_menu.addAction(show_action)
 
@@ -397,32 +397,23 @@ class WhisperWriterApp(QObject):
 
     def _handle_inline_prompt_submit_on_ui(self, instructions_text: str):
         import pyperclip as _pc
-        # If a preview has already been generated and is visible, paste it directly
-        # instead of generating again. This makes Enter act as "paste preview" when
-        # the preview panel shows content.
-    
+        # Ctrl+Enter (submit): If there is a previous assistant message, paste it.
+        # Otherwise, generate now and paste when ready.
+        last_assistant = ''
         try:
             if self.prompt_popup:
-                preview_visible = self.prompt_popup.result_view.isVisible()
-                preview_text = (self.prompt_popup.result_view.toPlainText() or '').strip()
-            else:
-                preview_visible = False
-                preview_text = ''
+                last_assistant = (self.prompt_popup.get_last_assistant_text() or '').strip()
         except Exception:
-            preview_visible = False
-            preview_text = ''
-        if preview_visible and preview_text:
-            # Close popup so focus returns to the previous app, then paste preview
+            last_assistant = ''
+        if last_assistant:
             if self.prompt_popup:
-                # Ensure loader is off in case it was left on
                 self.prompt_popup.set_loading(False)
                 self.prompt_popup.close()
                 try:
                     self.prompt_popup.reset()
                 except Exception:
                     pass
-            # Paste with clipboard verification and fallback to typing
-            self._paste_with_verification_and_fallback(preview_text)
+            self._paste_with_verification_and_fallback(last_assistant)
             if ConfigManager.get_config_value('misc', 'noise_on_completion'):
                 play_beep()
             try:
@@ -437,8 +428,17 @@ class WhisperWriterApp(QObject):
                 context_text = (self.app.clipboard().text() or '').strip()
             except Exception:
                 context_text = ''
-        # Keep popup open and show loader while we wait for the result
+        # Add user's message bubble, clear input, keep focus, and show loader while we compute
         if self.prompt_popup:
+            try:
+                self.prompt_popup.add_user_message(instructions_text)
+            except Exception:
+                pass
+            try:
+                self.prompt_popup.text_edit.clear()
+                self.prompt_popup.text_edit.setFocus(Qt.ActiveWindowFocusReason)
+            except Exception:
+                pass
             self.prompt_popup.set_loading(True)
         # Start background completion so UI stays responsive
         def _worker():
@@ -448,7 +448,17 @@ class WhisperWriterApp(QObject):
 
     def _handle_inline_preview_on_ui(self, instructions_text: str):
         import pyperclip as _pc
-        # Read context from clipboard (copied when popup opened)
+        # Add user's message bubble, clear input, keep focus, then read context
+        if self.prompt_popup:
+            try:
+                self.prompt_popup.add_user_message(instructions_text)
+            except Exception:
+                pass
+            try:
+                self.prompt_popup.text_edit.clear()
+                self.prompt_popup.text_edit.setFocus(Qt.ActiveWindowFocusReason)
+            except Exception:
+                pass
         context_text = (_pc.paste() or '').strip()
         if not context_text and hasattr(self, 'app'):
             try:
@@ -517,16 +527,28 @@ class WhisperWriterApp(QObject):
 
     @pyqtSlot(str)
     def _on_inline_preview_ready_on_ui(self, final_output: str):
-        # Render preview result inside the popup and stop the loader
+        # Render preview result as assistant bubble, stop loader, and keep input focused
         if self.prompt_popup:
             self.prompt_popup.set_loading(False)
-            self.prompt_popup.set_result_text(final_output or '')
+            try:
+                self.prompt_popup.add_assistant_message(final_output or '')
+            except Exception:
+                pass
+            try:
+                self.prompt_popup.text_edit.setFocus(Qt.ActiveWindowFocusReason)
+            except Exception:
+                pass
 
     @pyqtSlot(str)
     def _on_inline_prompt_ready_on_ui(self, final_output: str):
-        # Close popup, place result in clipboard, paste, and resume hotkey listening
+        # Close popup, paste the assistant message, and resume hotkey listening
         if self.prompt_popup:
             self.prompt_popup.set_loading(False)
+            try:
+                # Add assistant bubble before closing so the full chat is visible briefly
+                self.prompt_popup.add_assistant_message(final_output or '')
+            except Exception:
+                pass
             self.prompt_popup.close()
             try:
                 self.prompt_popup.reset()
@@ -605,5 +627,5 @@ def play_beep():
 
 
 if __name__ == '__main__':
-    app = WhisperWriterApp()
+    app = VibeWriterApp()
     app.run()

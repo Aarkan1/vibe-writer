@@ -1,47 +1,52 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
 from utils import ConfigManager
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout
 
 
-class SpinnerWidget(QWidget):
+class TypingIndicatorWidget(QWidget):
 	"""
-	Minimal spinning arc loader. Dark-theme friendly.
+	Animated three-dot typing indicator, suitable for dark backgrounds.
 	"""
 
-	def __init__(self, diameter: int = 28, parent=None):
+	def __init__(self, parent=None):
 		super().__init__(parent)
-		self._diameter = diameter
-		self._angle = 0.0
 		self._timer = QTimer(self)
 		self._timer.timeout.connect(self._tick)
-		self.setFixedSize(self._diameter, self._diameter)
+		self._phase = 0
+		self._dot_color = QColor('#DDE2E7')
+		self._diameter = 6
+		self._spacing = 6
+		w = self._diameter * 3 + self._spacing * 2
+		h = self._diameter
+		self.setFixedSize(w, h)
+		self.setAttribute(Qt.WA_TranslucentBackground, True)
 
 	def start(self):
 		if not self._timer.isActive():
-			self._timer.start(16)
+			self._timer.start(260)
 
 	def stop(self):
 		if self._timer.isActive():
 			self._timer.stop()
 
 	def _tick(self):
-		self._angle = (self._angle + 6.0) % 360.0
+		self._phase = (self._phase + 1) % 3
 		self.update()
 
 	def paintEvent(self, _):
-		p = QPainter(self)
-		p.setRenderHint(QPainter.Antialiasing)
-		pen = QPen(QColor('#6EE7B7'))
-		pen.setWidthF(max(2.0, self._diameter * 0.08))
-		pen.setCapStyle(Qt.RoundCap)
-		p.setPen(pen)
-		p.setBrush(Qt.NoBrush)
-		m = pen.widthF()
-		rect = QRectF(m, m, self._diameter - 2*m, self._diameter - 2*m)
-		span_deg = 120 * 16  # 120 degrees in Qt's 1/16th units
-		start_deg = int(self._angle * 16)
-		p.drawArc(rect, start_deg, span_deg)
+		painter = QPainter(self)
+		painter.setRenderHint(QPainter.Antialiasing)
+		base_alpha = 90
+		bright_alpha = 220
+		for i in range(3):
+			alpha = bright_alpha if i == self._phase else base_alpha
+			color = QColor(self._dot_color)
+			color.setAlpha(alpha)
+			painter.setBrush(QBrush(color))
+			painter.setPen(Qt.NoPen)
+			x = i * (self._diameter + self._spacing)
+			painter.drawEllipse(x, 0, self._diameter, self._diameter)
 
 
 class PromptPopup(QWidget):
@@ -51,7 +56,7 @@ class PromptPopup(QWidget):
 	- Enter previews
 	- Ctrl+Enter pastes
 	- Esc cancels
-	- Uses the same dark rounded theme as the status equalizer
+	- Chat-style UI: messages in bubbles (you → right, assistant → left)
 	"""
 
 	submitted = pyqtSignal(str)
@@ -69,8 +74,8 @@ class PromptPopup(QWidget):
 		# Enable passive tracking so we can change the cursor near edges for resizing.
 		self.setMouseTracking(True)
 		# Use logical size with moderate minimum to avoid oversized popup on Windows
-		min_w, min_h = 420, 250
-		w, h = 500, 280
+		min_w, min_h = 420, 450
+		w, h = 500, 480
 		self.setMinimumSize(min_w, min_h)
 		# Initial size only; allow user resizing afterward.
 		self.resize(max(w, min_w), max(h, min_h))
@@ -95,16 +100,21 @@ class PromptPopup(QWidget):
 		self.hint_label.setStyleSheet("color: #B5B9C0; font-size: 12px;")
 		layout.addWidget(self.hint_label)
 
-		# --- Accordion: Clipboard context preview (read-only), open by default ---
+		# --- Accordion: Clipboard context preview (read-only) ---
 		self.clipboard_header = QToolButton(self)
-		self.clipboard_header.setText("Clipboard context (read-only)")
+		self.clipboard_header.setText("Clipboard (read-only)")
 		self.clipboard_header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 		self.clipboard_header.setCheckable(True)
-		self.clipboard_header.setChecked(True)
+		# Default closed
+		self.clipboard_header.setChecked(False)
+		try:
+			self.clipboard_header.setArrowType(Qt.RightArrow)
+		except Exception:
+			pass
 		self.clipboard_header.setStyleSheet(
 			"QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 13px; }"
 		)
-		layout.addWidget(self.clipboard_header)
+		# Do not add to layout here; we place it above the input, after messages
 
 		self.clipboard_frame = QFrame(self)
 		self.clipboard_frame.setFrameShape(QFrame.NoFrame)
@@ -128,15 +138,51 @@ class PromptPopup(QWidget):
 		self.clipboard_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 		clipboard_v.addWidget(self.clipboard_view)
 
-		layout.addWidget(self.clipboard_frame)
+		# Do not add to layout here; we place it above the input, after messages
 
 		def _toggle_clipboard_section(checked: bool):
-			# Simple accordion behavior: show/hide the content frame
+			# Show/hide and rotate arrow (up when open because content sits above)
 			self.clipboard_frame.setVisible(checked)
+			try:
+				self.clipboard_header.setArrowType(Qt.UpArrow if checked else Qt.RightArrow)
+			except Exception:
+				pass
 		# Connect after defining handler
 		self.clipboard_header.toggled.connect(_toggle_clipboard_section)
-		self.clipboard_frame.setVisible(True)
+		self.clipboard_frame.setVisible(False)
 
+		# --- Chat messages area (scrollable) ---
+		self.messages_scroll = QScrollArea(self)
+		self.messages_scroll.setWidgetResizable(True)
+		self.messages_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		# Match chat background to popup background by keeping it transparent (popup paints bg)
+		self.messages_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+		self.messages_widget = QWidget(self)
+		self.messages_widget.setStyleSheet("background: transparent;")
+		self.messages_layout = QVBoxLayout(self.messages_widget)
+		self.messages_layout.setContentsMargins(2, 2, 2, 2)
+		self.messages_layout.setSpacing(8)
+		# Stretch at bottom keeps messages packed to top but allows growth
+		self._messages_spacer = QWidget(self.messages_widget)
+		self._messages_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+		self.messages_layout.addWidget(self._messages_spacer)
+		self.messages_scroll.setWidget(self.messages_widget)
+		layout.addWidget(self.messages_scroll, stretch=1)
+		# Typing indicator (three dots); hidden by default, positioned above the clipboard preview
+		self.loader = TypingIndicatorWidget()
+		self.loader.hide()
+		loader_row = QHBoxLayout()
+		loader_row.setContentsMargins(0, 0, 0, 0)
+		loader_row.addStretch(1)
+		loader_row.addWidget(self.loader, 0)
+		layout.addLayout(loader_row)
+		# Place clipboard preview right above the chat input (closed by default): frame above, header below
+		layout.addWidget(self.clipboard_frame)
+		layout.addWidget(self.clipboard_header)
+		# Track bubble widgets to update widths on resize
+		self._message_bubbles = []
+
+		# --- Input box at the bottom ---
 		self.text_edit = QTextEdit(self)
 		self.text_edit.setPlaceholderText("Write your instructions…")
 		self.text_edit.setStyleSheet(
@@ -145,23 +191,22 @@ class PromptPopup(QWidget):
 		self.text_edit.setAcceptRichText(False)
 		self.text_edit.setTabChangesFocus(False)
 		self.text_edit.setFocusPolicy(Qt.StrongFocus)
+		# Keep internal scrolling off until needed; we auto-resize up to a limit
+		self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 		# Intercept Enter/Escape while the editor has focus
 		self.text_edit.installEventFilter(self)
-		layout.addWidget(self.text_edit, stretch=1)
+		layout.addWidget(self.text_edit)
 
-		# Subtle spinner loader; hidden by default
-		self.loader = SpinnerWidget(diameter=28)
-		self.loader.hide()
-		layout.addWidget(self.loader)
+		# --- Auto-resize the input: 1-line tall by default, expand with content ---
+		self._input_min_height = 0
+		self._input_max_height = 0
+		self._input_extra_padding = 0
+		self._init_input_auto_resize()
 
-		# Read-only result area shown for Enter previews
-		self.result_view = QTextEdit(self)
-		self.result_view.setReadOnly(True)
-		self.result_view.setStyleSheet(
-			"QTextEdit { background: rgba(255,255,255,0.04); color: #DDE2E7; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; }"
-		)
-		self.result_view.hide()
-		layout.addWidget(self.result_view, stretch=1)
+		# Loader row already placed above the clipboard preview
+
+		# Track last assistant message for Ctrl+Enter paste
+		self._last_assistant_text = ""
 
 		# Build rules to suppress accidental spaces when holding hotkey chords
 		# like Ctrl+Alt+Space for recording. We read the configured hotkeys and
@@ -184,8 +229,8 @@ class PromptPopup(QWidget):
 		"""Clear input and reset UI state so popup opens empty and ready."""
 		self.set_loading(False)
 		self.text_edit.clear()
-		self.result_view.clear()
-		self.result_view.hide()
+		self.clear_messages()
+		self._last_assistant_text = ""
 
 	def show(self):
 		# Center on screen
@@ -311,6 +356,18 @@ class PromptPopup(QWidget):
 			self.cancelled.emit()
 		return super().event(event)
 
+	def resizeEvent(self, event):
+		# Ensure input height and bubble widths are recalculated when the popup resizes
+		super().resizeEvent(event)
+		try:
+			self._recalculate_input_height()
+		except Exception:
+			pass
+		try:
+			self._update_bubble_widths()
+		except Exception:
+			pass
+
 	def _build_space_suppression_rules(self):
 		"""Compute modifier masks for any configured hotkeys that use SPACE.
 
@@ -401,7 +458,8 @@ class PromptPopup(QWidget):
 		try:
 			if self.text_edit.isAncestorOf(child):
 				return False
-			if self.result_view.isAncestorOf(child):
+			# Do not drag while interacting with messages area
+			if hasattr(self, 'messages_widget') and self.messages_widget.isAncestorOf(child):
 				return False
 			# Do not drag when interacting with the clipboard accordion or its contents
 			if hasattr(self, 'clipboard_view') and self.clipboard_view.isAncestorOf(child):
@@ -521,15 +579,144 @@ class PromptPopup(QWidget):
 			self.text_edit.setDisabled(False)
 			self.hint_label.setText("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
 
-	def set_result_text(self, text: str):
-		"""Show the result text in the read-only area below the input."""
-		self.result_view.setPlainText(text or "")
-		self.result_view.show()
-		# Move cursor to start for readability
+	# ------------------------- Input auto-resize helpers ------------------------- #
+
+	def _init_input_auto_resize(self):
+		"""Initialize 1-line input height and connect signals to grow with content.
+
+		We compute a base single-line height from the current font metrics and add
+		a small padding to account for style padding/frame. The input grows with its
+		document height up to a max number of rows; beyond that, it scrolls.
+		"""
 		try:
-			cursor = self.result_view.textCursor()
-			cursor.movePosition(cursor.Start)
-			self.result_view.setTextCursor(cursor)
+			fm = self.text_edit.fontMetrics()
+			line_h = max(1, fm.lineSpacing())
+			# Style padding is 8px top/bottom; add frame width and a small fudge
+			frame = max(0, int(self.text_edit.frameWidth())) * 2
+			self._input_extra_padding = 16 + frame + 4
+			self._input_min_height = line_h + self._input_extra_padding
+			# Allow auto-growth up to ~6 lines by default
+			self._input_max_height = (line_h * 6) + self._input_extra_padding
+			self.text_edit.setFixedHeight(self._input_min_height)
+			# Recalculate on text/document size and when the viewport width changes
+			self.text_edit.textChanged.connect(self._recalculate_input_height)
+			try:
+				layout = self.text_edit.document().documentLayout()
+				layout.documentSizeChanged.connect(lambda _=None: self._recalculate_input_height())
+			except Exception:
+				pass
+		except Exception:
+			pass
+		# Initial calculation
+		self._recalculate_input_height()
+
+	def _recalculate_input_height(self):
+		"""Resize the input field height to fit content up to a multi-line cap."""
+		try:
+			doc = self.text_edit.document()
+			# Ensure wrapping width matches current viewport width
+			doc.setTextWidth(self.text_edit.viewport().width())
+			doc_h = int(doc.size().height())
+			target = max(self._input_min_height, min(self._input_max_height, doc_h + self._input_extra_padding))
+			if self.text_edit.height() != target:
+				self.text_edit.setFixedHeight(target)
+				# Keep the latest text visible when we grow
+				try:
+					cursor = self.text_edit.textCursor()
+					self.text_edit.setTextCursor(cursor)
+				except Exception:
+					pass
+		except Exception:
+			pass
+
+	def add_user_message(self, text: str):
+		"""Add a right-aligned user message bubble to the chat and scroll to bottom."""
+		bubble = self._create_bubble(text or "", is_user=True)
+		self._insert_message_widget(bubble)
+		self._scroll_to_bottom()
+
+	def add_assistant_message(self, text: str):
+		"""Add a left-aligned assistant message bubble to the chat and scroll to bottom.
+
+		Also remembers the last assistant text for Ctrl+Enter paste.
+		"""
+		self._last_assistant_text = text or ""
+		bubble = self._create_bubble(self._last_assistant_text, is_user=False)
+		self._insert_message_widget(bubble)
+		self._scroll_to_bottom()
+
+	def get_last_assistant_text(self) -> str:
+		"""Return the most recent assistant message text for paste action."""
+		return self._last_assistant_text or ""
+
+	def clear_messages(self):
+		"""Remove all message bubbles from the chat area, keeping the spacer."""
+		# Remove all items except the spacer at the end
+		count = self.messages_layout.count()
+		for i in reversed(range(count)):
+			item = self.messages_layout.itemAt(i)
+			w = item.widget()
+			if w is self._messages_spacer:
+				continue
+			if w is not None:
+				self.messages_layout.removeWidget(w)
+				w.setParent(None)
+
+	def _insert_message_widget(self, w: QWidget):
+		# Insert before the spacer so spacer remains last
+		index = max(0, self.messages_layout.count() - 1)
+		self.messages_layout.insertWidget(index, w)
+
+	def _create_bubble(self, text: str, is_user: bool) -> QWidget:
+		container = QWidget(self.messages_widget)
+		h = QHBoxLayout(container)
+		h.setContentsMargins(0, 0, 0, 0)
+		h.setSpacing(0)
+		bubble = QFrame(container)
+		bubble.setFrameShape(QFrame.NoFrame)
+		# Match clipboard read-only area styling
+		bubble.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: none; border-radius: 8px; }")
+		inner = QVBoxLayout(bubble)
+		inner.setContentsMargins(8, 8, 8, 8)
+		inner.setSpacing(4)
+		label = QLabel(text, bubble)
+		label.setWordWrap(True)
+		label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+		# Use clipboard view font size and color
+		label.setStyleSheet("QLabel { color: #E8EAED; font-size: 13px; background: transparent; }")
+		inner.addWidget(label)
+		if is_user:
+			h.addStretch(1)
+			h.addWidget(bubble, 0)
+		else:
+			h.addWidget(bubble, 0)
+			h.addStretch(1)
+		# Constrain bubble width to 70% of viewport
+		try:
+			vw = self.messages_scroll.viewport().width()
+			bubble.setMaximumWidth(int(vw * 0.7))
+		except Exception:
+			pass
+		# Track for future resize adjustments
+		self._message_bubbles.append(bubble)
+		return container
+
+	def _scroll_to_bottom(self):
+		try:
+			bar = self.messages_scroll.verticalScrollBar()
+			bar.setValue(bar.maximum())
+		except Exception:
+			pass
+
+	def _update_bubble_widths(self):
+		"""Update existing message bubbles to keep width at 70% of chat viewport."""
+		try:
+			vw = self.messages_scroll.viewport().width()
+			max_w = int(vw * 0.7)
+			for bubble in list(self._message_bubbles):
+				if bubble is None or bubble.parent() is None:
+					continue
+				bubble.setMaximumWidth(max_w)
 		except Exception:
 			pass
 
