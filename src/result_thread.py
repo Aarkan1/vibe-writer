@@ -1,7 +1,12 @@
 import time
 import traceback
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd  # type: ignore
+    _SOUND_OK = True
+except Exception:
+    sd = None  # type: ignore
+    _SOUND_OK = False
 import tempfile
 import wave
 import webrtcvad
@@ -110,6 +115,9 @@ class ResultThread(QThread):
 
         :return: numpy array of audio data, or None if the recording is too short
         """
+        if not _SOUND_OK:
+            ConfigManager.console_print('Audio subsystem unavailable (sounddevice not installed). Skipping recording.')
+            return None
         recording_options = ConfigManager.get_config_section('recording_options')
         self.sample_rate = recording_options.get('sample_rate') or 16000
         frame_duration_ms = 30  # 30ms frame duration for WebRTC VAD

@@ -1,5 +1,6 @@
 import yaml
 import os
+import unicodedata
 
 class ConfigManager:
     _instance = None
@@ -140,3 +141,81 @@ class ConfigManager:
         """Print a message to the console if enabled in the configuration."""
         if cls._instance and cls._instance.config['misc']['print_to_terminal']:
             print(message)
+
+
+def sanitize_text_for_output(text: str) -> str:
+    """Return text normalized for robust cross-app pasting.
+
+    - Normalize to NFC to combine composed characters consistently.
+    - Replace narrow no-break space (U+202F) and no-break space (U+00A0) with regular spaces.
+    - Keep all other Unicode intact so modern apps render emoji and symbols.
+    """
+    if text is None:
+        return ''
+    try:
+        normalized = unicodedata.normalize('NFC', text)
+    except Exception:
+        normalized = text
+    # Replace spaces that commonly cause mojibake in some apps
+    normalized = normalized.replace('\u202F', ' ').replace('\u00A0', ' ')
+    # Attempt to fix common UTF-8→cp1252/latin-1 mojibake (e.g., "Itâs" → "It’s").
+    # We only attempt the repair when likely markers appear to avoid changing valid text.
+    # Strategy: try to interpret the current text as if it was mis-decoded from UTF-8 bytes
+    # using Windows-1252, by re-encoding to cp1252 bytes and decoding as UTF-8.
+    # If this reduces suspicious marker characters ("â", "Ã") we accept the fix.
+    try:
+        # Trigger repair if any common markers of mojibake appear,
+        # including generic 'â', 'Ã', or 'Â'.
+        suspicious_markers = ('â€™', 'â€œ', 'â€�', 'â€”', 'â€“', 'â€˜', 'â€¦', 'Â', 'Ã', 'â')
+        if any(m in normalized for m in suspicious_markers):
+            candidate = normalized.encode('cp1252', errors='strict').decode('utf-8', errors='strict')
+            score_before = normalized.count('â') + normalized.count('Ã')
+            score_after = candidate.count('â') + candidate.count('Ã')
+            if score_after < score_before:
+                # Re-normalize to NFC after correction
+                try:
+                    normalized = unicodedata.normalize('NFC', candidate)
+                except Exception:
+                    normalized = candidate
+    except Exception:
+        # If anything goes wrong, keep the original normalized text.
+        pass
+    # Also replace a few fraction glyphs that often misrender as sequences like "Â½"
+    try:
+        mapping = {
+            '½': '1/2',
+            '¼': '1/4',
+            '¾': '3/4',
+        }
+        return normalized.translate(str.maketrans(mapping))
+    except Exception:
+        out = normalized
+        out = out.replace('½', '1/2').replace('¼', '1/4').replace('¾', '3/4')
+        return out
+
+
+def transliterate_for_typing(text: str) -> str:
+    """Conservatively transliterate a few problematic glyphs for per-key typing fallbacks.
+
+    Only used when we cannot paste via clipboard and must send key events. This avoids
+    mojibake like "Â½" by replacing single-codepoint fractions with ASCII equivalents.
+    """
+    if not text:
+        return ''
+    mapping = {
+        '½': '1/2',
+        '¼': '1/4',
+        '¾': '3/4',
+        # Dashes/ellipsis often display oddly in legacy targets; use simple ASCII
+        '–': '-',
+        '—': '-',
+        '…': '...',
+    }
+    try:
+        return text.translate(str.maketrans(mapping))
+    except Exception:
+        # Fallback safe return
+        out = text
+        for k, v in mapping.items():
+            out = out.replace(k, v)
+        return out

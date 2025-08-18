@@ -2,8 +2,14 @@ import os
 import sys
 import time
 import threading
-import sounddevice as sd
-import soundfile as sf
+try:
+    import sounddevice as sd
+    import soundfile as sf
+    _SOUND_OK = True
+except Exception:
+    sd = None  # type: ignore
+    sf = None  # type: ignore
+    _SOUND_OK = False
 from pynput.keyboard import Controller
 from PyQt5.QtCore import QObject, QProcess, pyqtSignal, pyqtSlot, Qt, QTimer, QCoreApplication
 from PyQt5.QtGui import QIcon, QGuiApplication
@@ -17,9 +23,9 @@ from ui.status_window import StatusWindow
 from ui.prompt_popup import PromptPopup
 from transcription import create_local_model
 from input_simulation import InputSimulator
-from utils import ConfigManager
+from utils import ConfigManager, sanitize_text_for_output
 import pyperclip
-from llm_helper import generate_with_llm
+from llm_helper import generate_with_llm, stream_with_llm
 
 
 class VibeWriterApp(QObject):
@@ -31,6 +37,7 @@ class VibeWriterApp(QObject):
     # Background completion result signals (emitted from worker threads)
     inlinePreviewReady = pyqtSignal(str)
     inlinePromptReady = pyqtSignal(str)
+    inlineStreamDelta = pyqtSignal(str)
 
     def __init__(self):
         """
@@ -114,6 +121,7 @@ class VibeWriterApp(QObject):
         # Connect background completion signals
         self.inlinePreviewReady.connect(self._on_inline_preview_ready_on_ui)
         self.inlinePromptReady.connect(self._on_inline_prompt_ready_on_ui)
+        self.inlineStreamDelta.connect(self._on_inline_stream_delta_on_ui)
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
@@ -260,7 +268,7 @@ class VibeWriterApp(QObject):
            call OpenRouter with clipboard as CONTEXT and transcription as INSTRUCTIONS.
            Otherwise, paste the transcription directly.
         """
-        transcription_text = result or ''
+        transcription_text = sanitize_text_for_output(result or '')
 
         final_output = ''
         if self.current_mode == 'prompt' and transcription_text:
@@ -276,7 +284,7 @@ class VibeWriterApp(QObject):
             ConfigManager.console_print(
                 f"Transcription complete (prompt mode) | len(transcription)={len(transcription_text)} | copy_sent={copy_sent} | len(clipboard)={len(clipboard_text)}"
             )
-            final_output = generate_with_llm(clipboard_text, transcription_text) or ''
+            final_output = sanitize_text_for_output(generate_with_llm(clipboard_text, transcription_text) or '')
             if not final_output:
                 ConfigManager.console_print("LLM provider returned empty result. Falling back to plain transcription.")
                 final_output = transcription_text
@@ -447,9 +455,23 @@ class VibeWriterApp(QObject):
                 history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
             except Exception:
                 history = []
-            final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
+            # Prefer streaming; fall back to non-stream on failure
+            def _on_delta(s: str):
+                try:
+                    self.inlineStreamDelta.emit(s)
+                except Exception:
+                    pass
+            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta) or ''
+            if not final_output:
+                final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePromptReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
+        # Prepare live assistant bubble for streaming output
+        try:
+            if self.prompt_popup:
+                self.prompt_popup.begin_streaming_assistant_message()
+        except Exception:
+            pass
 
     def _handle_inline_preview_on_ui(self, instructions_text: str):
         import pyperclip as _pc
@@ -480,9 +502,23 @@ class VibeWriterApp(QObject):
                 history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
             except Exception:
                 history = []
-            final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
+            # Stream first; fall back to non-stream
+            def _on_delta(s: str):
+                try:
+                    self.inlineStreamDelta.emit(s)
+                except Exception:
+                    pass
+            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta) or ''
+            if not final_output:
+                final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePreviewReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
+        # Create live assistant bubble to receive streaming deltas
+        try:
+            if self.prompt_popup:
+                self.prompt_popup.begin_streaming_assistant_message()
+        except Exception:
+            pass
 
     def _complete_inline_preview(self, context_text: str, instructions_text: str):
         try:
@@ -545,11 +581,14 @@ class VibeWriterApp(QObject):
 
     @pyqtSlot(str)
     def _on_inline_preview_ready_on_ui(self, final_output: str):
-        # Render preview result as assistant bubble, stop loader, and keep input focused
+        # Render preview: if streaming active, finalize; else add as a single bubble
         if self.prompt_popup:
             self.prompt_popup.set_loading(False)
             try:
-                self.prompt_popup.add_assistant_message(final_output or '')
+                if getattr(self.prompt_popup, '_streaming_viewer', None) is not None:
+                    self.prompt_popup.finish_streaming_assistant_message()
+                else:
+                    self.prompt_popup.add_assistant_message(final_output or '')
             except Exception:
                 pass
             try:
@@ -563,8 +602,10 @@ class VibeWriterApp(QObject):
         if self.prompt_popup:
             self.prompt_popup.set_loading(False)
             try:
-                # Add assistant bubble before closing so the full chat is visible briefly
-                self.prompt_popup.add_assistant_message(final_output or '')
+                if getattr(self.prompt_popup, '_streaming_viewer', None) is not None:
+                    self.prompt_popup.finish_streaming_assistant_message()
+                else:
+                    self.prompt_popup.add_assistant_message(final_output or '')
             except Exception:
                 pass
             self.prompt_popup.close()
@@ -581,28 +622,41 @@ class VibeWriterApp(QObject):
         except Exception:
             pass
 
+    @pyqtSlot(str)
+    def _on_inline_stream_delta_on_ui(self, delta_text: str):
+        # Append streaming delta to the live assistant bubble
+        if not delta_text:
+            return
+        if self.prompt_popup:
+            try:
+                self.prompt_popup.append_streaming_assistant_delta(delta_text)
+            except Exception:
+                pass
+
     def _paste_with_verification_and_fallback(self, text: str, delay_ms: int = 50):
         """Attempt to paste by setting clipboard and sending paste.
 
         If clipboard cannot be set (e.g., Wayland/X11 ownership issues), fall back to typing.
         """
+        # Sanitize text to prevent mojibake when pasting into target apps.
+        clean_text = sanitize_text_for_output(text or '')
         def _attempt():
             # On Linux desktops, clipboard ownership can be restricted; prefer typing directly.
             try:
                 if sys.platform.startswith('linux'):
-                    self.input_simulator.typewrite(text)
+                    self.input_simulator.typewrite(clean_text)
                     return
             except Exception:
                 pass
             # Try both pyperclip and Qt clipboard
             try:
                 import pyperclip as _pc
-                _pc.copy(text)
+                _pc.copy(clean_text)
             except Exception:
                 pass
             try:
                 cb = self.app.clipboard()
-                cb.setText(text)
+                cb.setText(clean_text)
             except Exception:
                 pass
             # Verify clipboard contents
@@ -610,13 +664,13 @@ class VibeWriterApp(QObject):
             pc_ok = False
             try:
                 qt_text = (self.app.clipboard().text() or '').strip()
-                qt_ok = (qt_text == (text or '').strip())
+                qt_ok = (qt_text == (clean_text or '').strip())
             except Exception:
                 qt_ok = False
             try:
                 import pyperclip as _pc
                 pc_text = (_pc.paste() or '').strip()
-                pc_ok = (pc_text == (text or '').strip())
+                pc_ok = (pc_text == (clean_text or '').strip())
             except Exception:
                 pc_ok = False
             # If clipboard seems correct, try system paste; otherwise type
@@ -625,7 +679,7 @@ class VibeWriterApp(QObject):
                 if sent:
                     return
             # Fallback: simulate typing
-            self.input_simulator.typewrite(text)
+            self.input_simulator.typewrite(clean_text)
 
         # Slight delay to allow focus return and clipboard propagation before paste
         QTimer.singleShot(delay_ms, _attempt)
@@ -636,6 +690,8 @@ def play_beep():
     Play a short WAV beep using sounddevice/soundfile.
     This avoids system-level GI/GStreamer deps.
     """
+    if not _SOUND_OK:
+        return
     try:
         data, sr = sf.read(os.path.join('assets', 'beep.wav'), dtype='float32')
         sd.play(data, sr)

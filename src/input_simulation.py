@@ -6,7 +6,7 @@ import sys
 from pynput.keyboard import Controller as PynputController, Key as PynputKey
 import pyperclip
 
-from utils import ConfigManager
+from utils import ConfigManager, sanitize_text_for_output, transliterate_for_typing
 
 def run_command_or_exit_on_failure(command):
     """
@@ -65,6 +65,8 @@ class InputSimulator:
         Args:
             text (str): The text to type.
         """
+        # Sanitize text to avoid narrow/no-break spaces that can mojibake in targets
+        text = sanitize_text_for_output(text)
         # First, try to paste everything in one go via the system clipboard.
         # This is preferred to avoid any inter-key delay and produce instant output.
         try:
@@ -79,12 +81,14 @@ class InputSimulator:
 
         # Fallback: type per key using the selected backend and configured delay.
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
+        # For per-key typing fallback, conservatively transliterate problematic glyphs
+        safe_text = transliterate_for_typing(text)
         if self.input_method == 'pynput':
-            self._typewrite_pynput(text, interval)
+            self._typewrite_pynput(safe_text, interval)
         elif self.input_method == 'ydotool':
-            self._typewrite_ydotool(text, interval)
+            self._typewrite_ydotool(safe_text, interval)
         elif self.input_method == 'dotool':
-            self._typewrite_dotool(text, interval)
+            self._typewrite_dotool(safe_text, interval)
 
     def _typewrite_pynput(self, text, interval):
         """

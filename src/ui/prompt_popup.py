@@ -1,5 +1,5 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
-from utils import ConfigManager
+from utils import ConfigManager, sanitize_text_for_output
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser
 
@@ -131,7 +131,8 @@ class PromptPopup(QWidget):
 		self.clipboard_view.setReadOnly(True)
 		self.clipboard_view.setAcceptRichText(False)
 		self.clipboard_view.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; } "
+			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; "
+			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; } "
 			+ self._scrollbar_qss()
 		)
 		# Let the inner editor expand within the fixed container and scroll as needed
@@ -190,7 +191,8 @@ class PromptPopup(QWidget):
 		self.text_edit = QTextEdit(self)
 		self.text_edit.setPlaceholderText("Write your instructions…")
 		self.text_edit.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; } "
+			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; "
+			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; } "
 			+ self._scrollbar_qss()
 		)
 		self.text_edit.setAcceptRichText(False)
@@ -216,6 +218,11 @@ class PromptPopup(QWidget):
 		# dicts like { 'role': 'user'|'assistant', 'content': str }.
 		# This lets us include past turns in the completion request.
 		self._history_messages = []
+		# Streaming state for assistant message (live updates)
+		self._streaming_viewer = None
+		self._streaming_bubble = None
+		self._streaming_container = None
+		self._streaming_text = ''
 
 		# Build rules to suppress accidental spaces when holding hotkey chords
 		# like Ctrl+Alt+Space for recording. We read the configured hotkeys and
@@ -240,6 +247,10 @@ class PromptPopup(QWidget):
 		self.text_edit.clear()
 		self.clear_messages()
 		self._last_assistant_text = ""
+		self._streaming_viewer = None
+		self._streaming_bubble = None
+		self._streaming_container = None
+		self._streaming_text = ''
 		# Also clear stored chat history
 		self._history_messages = []
 
@@ -259,6 +270,8 @@ class PromptPopup(QWidget):
 		# Refresh clipboard preview on open
 		try:
 			cb_text = QApplication.clipboard().text() or ""
+			# Sanitize clipboard preview to avoid mojibake in the read-only area
+			cb_text = sanitize_text_for_output(cb_text)
 			self.clipboard_view.setPlainText(cb_text)
 			# Move cursor to start for readability
 			cur = self.clipboard_view.textCursor()
@@ -642,23 +655,131 @@ class PromptPopup(QWidget):
 
 	def add_user_message(self, text: str):
 		"""Add a right-aligned user message bubble to the chat and scroll to bottom."""
+		# Sanitize to avoid mojibake (e.g., U+202F shown as â¯) before storing/rendering
+		clean = sanitize_text_for_output(text or "")
 		# Record in history first so callers can snapshot before/after as needed
-		self._history_messages.append({ 'role': 'user', 'content': text or "" })
-		bubble = self._create_bubble(text or "", is_user=True)
+		self._history_messages.append({ 'role': 'user', 'content': clean })
+		bubble = self._create_bubble(clean, is_user=True)
 		self._insert_message_widget(bubble)
+		# Allow UI to update before scrolling by adding a small delay
+		QTimer.singleShot(100, lambda: None)
 		self._scroll_to_bottom()
 
 	def add_assistant_message(self, text: str):
-		"""Add a left-aligned assistant message bubble to the chat and scroll to bottom.
+		"""Add a left-aligned assistant message bubble.
 
-		Also remembers the last assistant text for Ctrl+Enter paste.
+		We scroll only until the start of the assistant message aligns with the top
+		of the viewport, then stop auto-scrolling.
 		"""
-		self._last_assistant_text = text or ""
+		clean = sanitize_text_for_output(text or "")
+		self._last_assistant_text = clean
 		# Record in history
 		self._history_messages.append({ 'role': 'assistant', 'content': self._last_assistant_text })
-		bubble = self._create_bubble(self._last_assistant_text, is_user=False)
-		self._insert_message_widget(bubble)
-		self._scroll_to_bottom()
+		container = self._create_bubble(self._last_assistant_text, is_user=False)
+		self._insert_message_widget(container)
+
+	def begin_streaming_assistant_message(self):
+		"""Create an empty assistant bubble and prepare to append streamed text."""
+		# If a previous streaming session exists, finish it first
+		if self._streaming_viewer is not None:
+			try:
+				self.finish_streaming_assistant_message()
+			except Exception:
+				pass
+		self._streaming_text = ''
+		container = QWidget(self.messages_widget)
+		row = QHBoxLayout(container)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.setSpacing(0)
+		bubble = QFrame(container)
+		bubble.setFrameShape(QFrame.NoFrame)
+		bubble.setStyleSheet("QFrame { background: transparent; border: none; }")
+		inner = QVBoxLayout(bubble)
+		inner.setContentsMargins(8, 8, 8, 8)
+		inner.setSpacing(4)
+		viewer = QTextBrowser(bubble)
+		viewer.setOpenExternalLinks(False)
+		viewer.setOpenLinks(False)
+		viewer.setReadOnly(True)
+		viewer.setFrameShape(QFrame.NoFrame)
+		viewer.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setFocusPolicy(Qt.NoFocus)
+		viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+		viewer.setMinimumHeight(1)
+		viewer.setStyleSheet(
+			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; "
+			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; }"
+		)
+		try:
+			doc = viewer.document()
+			doc.setDocumentMargin(0)
+			doc.setDefaultStyleSheet(
+				"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
+				"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
+			)
+		except Exception:
+			pass
+		try:
+			viewer.setMarkdown("")
+		except Exception:
+			viewer.setPlainText("")
+		bubble.setProperty('is_user', False)
+		inner.addWidget(viewer)
+		row.addWidget(bubble, 0)
+		row.addStretch(1)
+		# Insert before spacer
+		index = max(0, self.messages_layout.count() - 1)
+		self.messages_layout.insertWidget(index, container)
+		# Width cap like normal assistant bubbles
+		try:
+			vw = self.messages_scroll.viewport().width()
+			max_w = int(vw * 0.7)
+			# Fix assistant bubble width to a fraction of viewport so it resizes with popup
+			bubble.setMinimumWidth(max_w)
+			bubble.setMaximumWidth(max_w)
+		except Exception:
+			pass
+		# Initial height
+		self._adjust_text_browser_height(viewer)
+		# Track
+		self._streaming_viewer = viewer
+		self._streaming_bubble = bubble
+		self._streaming_container = container
+		self._message_bubbles.append(bubble)
+		# Align the start of this assistant message to the top of the viewport once
+		QTimer.singleShot(100, lambda: None)
+		self._scroll_assistant_container_to_top(container)
+
+	def append_streaming_assistant_delta(self, delta_text: str):
+		"""Append streamed text to the live assistant bubble and resize."""
+		if not delta_text:
+			return
+		# Sanitize each delta to avoid accumulating problematic sequences
+		delta_text = sanitize_text_for_output(delta_text)
+		self._streaming_text = (self._streaming_text or '') + delta_text
+		self._last_assistant_text = self._streaming_text
+		viewer = self._streaming_viewer
+		if viewer is None:
+			return
+		try:
+			viewer.setMarkdown(self._streaming_text)
+		except Exception:
+			viewer.setPlainText(self._streaming_text)
+		self._adjust_text_browser_height(viewer)
+
+	def finish_streaming_assistant_message(self):
+		"""Finalize the streaming message: commit to history and stop loader."""
+		text = self._streaming_text or ''
+		if text:
+			# Record in history now that the full assistant message is available
+			self._history_messages.append({ 'role': 'assistant', 'content': text })
+		self.set_loading(False)
+		# Clear streaming refs
+		self._streaming_viewer = None
+		self._streaming_bubble = None
+		self._streaming_container = None
+		self._streaming_text = ''
 
 	def get_last_assistant_text(self) -> str:
 		"""Return the most recent assistant message text for paste action."""
@@ -698,8 +819,16 @@ class PromptPopup(QWidget):
 		h.setSpacing(0)
 		bubble = QFrame(container)
 		bubble.setFrameShape(QFrame.NoFrame)
-		# Match clipboard read-only area styling
-		bubble.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; }")
+		# Bubble styling:
+		# - Right (user) bubbles keep subtle background + border for emphasis.
+		# - Left (assistant) bubbles have no background (transparent) and no border.
+		#   This makes assistant messages appear as plain text on the popup background.
+		if is_user:
+			# Match clipboard read-only area styling for user bubble
+			bubble.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: none; border-radius: 8px; }")
+		else:
+			# Assistant bubble: no visual container
+			bubble.setStyleSheet("QFrame { background: transparent; border: none; }")
 		inner = QVBoxLayout(bubble)
 		inner.setContentsMargins(8, 8, 8, 8)
 		inner.setSpacing(4)
@@ -713,15 +842,33 @@ class PromptPopup(QWidget):
 		viewer.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 		viewer.setFocusPolicy(Qt.NoFocus)
+		# Prevent vertical stretching; we will control height explicitly.
+		viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+		viewer.setMinimumHeight(1)
 		# Match label/clipboard styling
 		viewer.setStyleSheet(
-			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
+			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; "
+			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; }"
 		)
+		# Reduce default document and block margins so bubbles hug content.
+		try:
+			doc = viewer.document()
+			doc.setDocumentMargin(0)
+			doc.setDefaultStyleSheet(
+				"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
+				"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
+			)
+		except Exception:
+			pass
 		# Prefer native Qt Markdown rendering (Qt 5.14+). Fallback to plain text.
 		try:
-			viewer.setMarkdown(text or "")
+			viewer.setMarkdown(sanitize_text_for_output(text or ""))
 		except Exception:
-			viewer.setPlainText(text or "")
+			viewer.setPlainText(sanitize_text_for_output(text or ""))
+		# Mark bubble type for later width updates
+		bubble.setProperty('is_user', is_user)
+		# Initial sizing before layout paint to avoid oversized first render
+		self._adjust_text_browser_height(viewer)
 		inner.addWidget(viewer)
 		if is_user:
 			h.addStretch(1)
@@ -729,12 +876,23 @@ class PromptPopup(QWidget):
 		else:
 			h.addWidget(bubble, 0)
 			h.addStretch(1)
-		# Constrain bubble width to 70% of viewport
+		# Set bubble width constraints
 		try:
 			vw = self.messages_scroll.viewport().width()
-			bubble.setMaximumWidth(int(vw * 0.7))
+			max_w = int(vw * 0.7)
+			if is_user:
+				# Fit user bubble to content width (with padding), capped at 70% viewport
+				target = self._compute_bubble_target_width(viewer, max_w)
+				bubble.setMinimumWidth(target)
+				bubble.setMaximumWidth(target)
+			else:
+				# Assistant bubble: fix width to a fraction of viewport so it tracks window size
+				bubble.setMinimumWidth(max_w)
+				bubble.setMaximumWidth(max_w)
 		except Exception:
 			pass
+		# Recalculate after width constraint for an accurate height
+		self._adjust_text_browser_height(viewer)
 		# Auto-size the text viewer height to its document contents so bubbles expand naturally.
 		try:
 			layout = viewer.document().documentLayout()
@@ -748,11 +906,34 @@ class PromptPopup(QWidget):
 		return container
 
 	def _scroll_to_bottom(self):
+		"""Scroll to the very bottom of the messages area with extra margin."""
 		try:
 			bar = self.messages_scroll.verticalScrollBar()
-			bar.setValue(bar.maximum())
+			# Use maximum plus some extra to ensure we really hit the bottom
+			extra_margin = 200  # Add extra pixels to ensure complete scroll
+			bar.setValue(bar.maximum() + extra_margin)
 		except Exception:
 			pass
+
+	def _scroll_assistant_container_to_top(self, container: QWidget):
+		"""Scroll so the assistant message container's top aligns with viewport top.
+
+		We do this only once per assistant message to avoid continuous auto-scrolling
+		during streaming. User messages still force scroll-to-bottom for chat UX.
+		"""
+		def _align():
+			try:
+				bar = self.messages_scroll.verticalScrollBar()
+				# y-position within the scroll content widget
+				top = max(bar.minimum(), min(bar.maximum(), max(0, container.pos().y())))
+				# Use maximum plus some extra to ensure we really hit the bottom
+				extra_margin = 100  # Add extra pixels to ensure complete scroll
+				top = max(top, bar.maximum() + extra_margin)
+				bar.setValue(top)
+			except Exception:
+				pass
+		# Defer to next cycle so layouts are up-to-date
+		QTimer.singleShot(0, _align)
 
 	def _update_bubble_widths(self):
 		"""Update existing message bubbles to keep width at 70% of chat viewport."""
@@ -762,14 +943,23 @@ class PromptPopup(QWidget):
 			for bubble in list(self._message_bubbles):
 				if bubble is None or bubble.parent() is None:
 					continue
-				bubble.setMaximumWidth(max_w)
-				# Also ensure any QTextBrowser inside resizes height to new width
+				viewer = None
 				try:
 					viewer = bubble.findChild(QTextBrowser)
+				except Exception:
+					viewer = None
+				if bool(bubble.property('is_user')) and viewer is not None:
+					# Recompute content-fit width for user bubble with current cap
+					target = self._compute_bubble_target_width(viewer, max_w)
+					bubble.setMinimumWidth(target)
+					bubble.setMaximumWidth(target)
+					self._adjust_text_browser_height(viewer)
+				else:
+					# Assistant bubble tracks popup width: fix to fraction of viewport
+					bubble.setMinimumWidth(max_w)
+					bubble.setMaximumWidth(max_w)
 					if viewer is not None:
 						self._adjust_text_browser_height(viewer)
-				except Exception:
-					pass
 		except Exception:
 			pass
 
@@ -783,10 +973,38 @@ class PromptPopup(QWidget):
 			doc = text_browser.document()
 			doc.setTextWidth(text_browser.viewport().width())
 			doc_h = int(doc.size().height())
-			if doc_h > 0 and text_browser.height() != doc_h:
-				text_browser.setFixedHeight(doc_h)
+			# Add a small fudge factor to avoid clipping descenders
+			new_h = max(1, doc_h + 2)
+			if text_browser.height() != new_h:
+				text_browser.setFixedHeight(new_h)
 		except Exception:
 			pass
+
+	def _compute_bubble_target_width(self, viewer: QTextBrowser, max_width: int) -> int:
+		"""Return desired bubble width for a user message: content width + padding, capped.
+
+		We measure the ideal document width without wrapping, then add padding to fit
+		the inner layout margins. Finally, we cap the result to the provided max width.
+		For short messages, we ensure a reasonable minimum width to avoid clipping.
+		"""
+		try:
+			doc = viewer.document()
+			# Measure ideal width without wrapping
+			old_width = doc.textWidth()
+			doc.setTextWidth(-1)
+			ideal = int(doc.idealWidth())
+			# Restore previous text width (height calc will set it later as needed)
+			doc.setTextWidth(old_width)
+			# Inner layout horizontal margins = 8 + 8; add small fudge for border
+			padding = 16 + 2
+			# Add extra padding for short messages to prevent clipping
+			target_width = ideal + padding
+			# Set a reasonable minimum width (100px) to avoid overly narrow bubbles
+			min_width = 100
+			return max(min_width, min(max_width, target_width))
+		except Exception:
+			# Fallback to cap if anything goes wrong
+			return max(100, max_width)
 
 	def _scrollbar_qss(self) -> str:
 		"""Return QSS rules for scrollbars that match the popup's dark theme.
