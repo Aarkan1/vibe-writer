@@ -204,3 +204,45 @@ openrouter:
       Please produce the final output now.
     type: text
     description: "User message template. Use {context} and {instructions} placeholders."
+
+# LLM provider selection for prompting
+llm:
+  provider:
+    value: openrouter
+    type: str
+    description: "Choose which provider to use for prompt generation."
+    options:
+      - openrouter
+      - openai
+
+# OpenAI settings (used for clipboard-context prompting)
+openai:
+  api_key:
+    value: null
+    type: str
+    description: "Your OpenAI API key. Stored in .env and censored in the UI."
+  model:
+    value: gpt-5-mini
+    type: str
+    description: "Default model to use for OpenAI prompts."
+    options:
+      - gpt-5
+      - gpt-5-mini
+      - gpt-5-nano
+      - gpt-4.1-mini
+      - gpt-4.1
+  system_prompt:
+    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary."
+    type: text
+    description: "System message for OpenAI."
+  user_prompt:
+    value: |
+      CONTEXT:
+      {context}
+
+      INSTRUCTIONS:
+      {instructions}
+
+      Please produce the final output now.
+    type: text
+    description: "User message template. Use {context} and {instructions} placeholders."
