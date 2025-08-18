@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Callable, Set, List, Optional, Any
 import threading
+import time
 
 from utils import ConfigManager
 
@@ -252,6 +253,17 @@ class KeyChord:
         """Initialize the KeyChord."""
         self.keys = keys
         self.pressed_keys: Set[KeyCode] = set()
+        # Track when each chord key was last pressed. We use this to ensure
+        # that a chord activates only when all of its required keys were
+        # pressed recently as part of the same input sequence. This avoids
+        # issues where a missed key-release event leaves a modifier (e.g., ALT)
+        # "stuck" as pressed, which could otherwise cause partial combos like
+        # CTRL+SHIFT to trigger a CTRL+SHIFT+ALT chord.
+        self.last_press_times: dict[KeyCode, float] = {}
+        # Keys older than this window (milliseconds) do not count for a fresh
+        # activation. A short window keeps the interaction fluid while
+        # preventing stale states from triggering.
+        self.freshness_window_ms: int = 1000
 
     def update(self, key: KeyCode, event_type: InputEvent) -> bool:
         """Update the state of pressed keys and check if the chord is active.
@@ -266,6 +278,8 @@ class KeyChord:
 
         if event_type == InputEvent.KEY_PRESS:
             self.pressed_keys.add(key)
+            # Record the press time so we can later require a fresh combo.
+            self.last_press_times[key] = time.monotonic() * 1000.0
         elif event_type == InputEvent.KEY_RELEASE:
             # Remove the key. Keep any other still-pressed chord keys so the
             # user can re-press the final key (e.g., SPACE) without having to
@@ -282,6 +296,43 @@ class KeyChord:
                     return False
             elif key not in self.pressed_keys:
                 return False
+        return True
+
+    def is_recently_active(self, now_ms: Optional[float] = None) -> bool:
+        """Return True if the chord is active and all required keys were
+        pressed recently within the freshness window.
+
+        This guards against stale modifier states due to missed release events
+        by requiring that the latest press of each required key (or any key in
+        a modifier group) occurred within a short time window.
+        """
+        if not self.is_active():
+            return False
+
+        if now_ms is None:
+            now_ms = time.monotonic() * 1000.0
+
+        for required in self.keys:
+            if isinstance(required, frozenset):
+                # For modifier groups, at least one of the group's keys must be
+                # pressed, and that press must be recent.
+                pressed_in_group = [k for k in required if k in self.pressed_keys]
+                if not pressed_in_group:
+                    return False
+                # Check the freshest press among the pressed keys in the group
+                # and ensure it is inside the freshness window.
+                freshest_age = min(
+                    now_ms - self.last_press_times.get(k, -1e12) for k in pressed_in_group
+                )
+                if freshest_age > self.freshness_window_ms:
+                    return False
+            else:
+                # Single required key must be pressed and recent.
+                if required not in self.pressed_keys:
+                    return False
+                age = now_ms - self.last_press_times.get(required, -1e12)
+                if age > self.freshness_window_ms:
+                    return False
         return True
 
     def _is_key_part_of_chord(self, key: KeyCode) -> bool:
@@ -463,7 +514,9 @@ class KeyListener:
         is_active_inline = self.key_chord_inline.update(key, event_type) if self.key_chord_inline else False
 
         # Highest priority: inline prompt (popup-only)
-        activated_inline = (not was_active_inline and is_active_inline and (
+        # Require a "fresh" full chord to avoid stale modifier states
+        # accidentally triggering the popup (e.g., ALT stuck as pressed).
+        activated_inline = (not was_active_inline and self.key_chord_inline.is_recently_active() and (
             not self.primary_keys_inline or (event_type == InputEvent.KEY_PRESS and key in self.primary_keys_inline)
         ))
         if activated_inline:
