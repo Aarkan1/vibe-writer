@@ -24,7 +24,7 @@ def generate_with_openrouter(context_text: str, instructions_text: str, model: O
     """
     # Load env in case app was launched without environment populated
     load_dotenv()
-    api_key = os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY') or ''
+    api_key = os.getenv('OPENROUTER_API_KEY') or ''
     # Prefer explicit param, then config selection, then env, then fallback default
     configured_model = None
     try:
