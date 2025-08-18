@@ -1,7 +1,7 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
 from utils import ConfigManager
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser
 
 
 class TypingIndicatorWidget(QWidget):
@@ -703,12 +703,26 @@ class PromptPopup(QWidget):
 		inner = QVBoxLayout(bubble)
 		inner.setContentsMargins(8, 8, 8, 8)
 		inner.setSpacing(4)
-		label = QLabel(text, bubble)
-		label.setWordWrap(True)
-		label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-		# Use clipboard view font size and color
-		label.setStyleSheet("QLabel { color: #E8EAED; font-size: 13px; border: none; background: transparent; }")
-		inner.addWidget(label)
+		# Use QTextBrowser to render Markdown content in chat bubbles.
+		# We keep it read-only and style it to look like a plain label.
+		viewer = QTextBrowser(bubble)
+		viewer.setOpenExternalLinks(False)
+		viewer.setOpenLinks(False)
+		viewer.setReadOnly(True)
+		viewer.setFrameShape(QFrame.NoFrame)
+		viewer.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setFocusPolicy(Qt.NoFocus)
+		# Match label/clipboard styling
+		viewer.setStyleSheet(
+			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
+		)
+		# Prefer native Qt Markdown rendering (Qt 5.14+). Fallback to plain text.
+		try:
+			viewer.setMarkdown(text or "")
+		except Exception:
+			viewer.setPlainText(text or "")
+		inner.addWidget(viewer)
 		if is_user:
 			h.addStretch(1)
 			h.addWidget(bubble, 0)
@@ -719,6 +733,14 @@ class PromptPopup(QWidget):
 		try:
 			vw = self.messages_scroll.viewport().width()
 			bubble.setMaximumWidth(int(vw * 0.7))
+		except Exception:
+			pass
+		# Auto-size the text viewer height to its document contents so bubbles expand naturally.
+		try:
+			layout = viewer.document().documentLayout()
+			layout.documentSizeChanged.connect(lambda _=None, v=viewer: self._adjust_text_browser_height(v))
+			# Initial sizing after it is laid out
+			QTimer.singleShot(0, lambda v=viewer: self._adjust_text_browser_height(v))
 		except Exception:
 			pass
 		# Track for future resize adjustments
@@ -741,6 +763,28 @@ class PromptPopup(QWidget):
 				if bubble is None or bubble.parent() is None:
 					continue
 				bubble.setMaximumWidth(max_w)
+				# Also ensure any QTextBrowser inside resizes height to new width
+				try:
+					viewer = bubble.findChild(QTextBrowser)
+					if viewer is not None:
+						self._adjust_text_browser_height(viewer)
+				except Exception:
+					pass
+		except Exception:
+			pass
+
+	def _adjust_text_browser_height(self, text_browser: QTextBrowser):
+		"""Resize a QTextBrowser's height to fit its document contents.
+
+		This keeps chat bubbles sized to their content with no inner scrollbars.
+		"""
+		try:
+			# Constrain layout to current viewport width so wrapping is correct
+			doc = text_browser.document()
+			doc.setTextWidth(text_browser.viewport().width())
+			doc_h = int(doc.size().height())
+			if doc_h > 0 and text_browser.height() != doc_h:
+				text_browser.setFixedHeight(doc_h)
 		except Exception:
 			pass
 
