@@ -1,7 +1,7 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
 from utils import ConfigManager
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame
 
 
 class SpinnerWidget(QWidget):
@@ -94,6 +94,48 @@ class PromptPopup(QWidget):
 		self.hint_label.setStyleSheet("color: #B5B9C0; font-size: 12px;")
 		layout.addWidget(self.hint_label)
 
+		# --- Accordion: Clipboard context preview (read-only), open by default ---
+		self.clipboard_header = QToolButton(self)
+		self.clipboard_header.setText("Clipboard context (read-only)")
+		self.clipboard_header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+		self.clipboard_header.setCheckable(True)
+		self.clipboard_header.setChecked(True)
+		self.clipboard_header.setStyleSheet(
+			"QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 13px; }"
+		)
+		layout.addWidget(self.clipboard_header)
+
+		self.clipboard_frame = QFrame(self)
+		self.clipboard_frame.setFrameShape(QFrame.NoFrame)
+		self.clipboard_frame.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; }")
+		# Make the accordion content a fixed height container; inner editor scrolls
+		self.clipboard_frame.setFixedHeight(140)
+		self.clipboard_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+		clipboard_v = QVBoxLayout(self.clipboard_frame)
+		clipboard_v.setContentsMargins(8, 8, 8, 8)
+		clipboard_v.setSpacing(4)
+
+		self.clipboard_view = QTextEdit(self.clipboard_frame)
+		self.clipboard_view.setReadOnly(True)
+		self.clipboard_view.setAcceptRichText(False)
+		self.clipboard_view.setStyleSheet(
+			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; }"
+		)
+		# Let the inner editor expand within the fixed container and scroll as needed
+		self.clipboard_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+		self.clipboard_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+		self.clipboard_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		clipboard_v.addWidget(self.clipboard_view)
+
+		layout.addWidget(self.clipboard_frame)
+
+		def _toggle_clipboard_section(checked: bool):
+			# Simple accordion behavior: show/hide the content frame
+			self.clipboard_frame.setVisible(checked)
+		# Connect after defining handler
+		self.clipboard_header.toggled.connect(_toggle_clipboard_section)
+		self.clipboard_frame.setVisible(True)
+
 		self.text_edit = QTextEdit(self)
 		self.text_edit.setPlaceholderText("Write your instructions…")
 		self.text_edit.setStyleSheet(
@@ -157,6 +199,16 @@ class PromptPopup(QWidget):
 		self.text_edit.setFocus(Qt.ActiveWindowFocusReason)
 		# Some platforms need a brief delay to reliably focus after show
 		QTimer.singleShot(60, self.force_focus)
+		# Refresh clipboard preview on open
+		try:
+			cb_text = QApplication.clipboard().text() or ""
+			self.clipboard_view.setPlainText(cb_text)
+			# Move cursor to start for readability
+			cur = self.clipboard_view.textCursor()
+			cur.movePosition(cur.Start)
+			self.clipboard_view.setTextCursor(cur)
+		except Exception:
+			pass
 		# Closing will be handled when the window deactivates
 
 	def force_focus(self):
@@ -348,6 +400,13 @@ class PromptPopup(QWidget):
 			if self.text_edit.isAncestorOf(child):
 				return False
 			if self.result_view.isAncestorOf(child):
+				return False
+			# Do not drag when interacting with the clipboard accordion or its contents
+			if hasattr(self, 'clipboard_view') and self.clipboard_view.isAncestorOf(child):
+				return False
+			if hasattr(self, 'clipboard_frame') and self.clipboard_frame.isAncestorOf(child):
+				return False
+			if hasattr(self, 'clipboard_header') and self.clipboard_header.isAncestorOf(child):
 				return False
 		except Exception:
 			pass
