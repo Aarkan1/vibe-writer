@@ -4,6 +4,7 @@ import signal
 import time
 import sys
 from pynput.keyboard import Controller as PynputController, Key as PynputKey
+import pyperclip
 
 from utils import ConfigManager
 
@@ -54,11 +55,29 @@ class InputSimulator:
 
     def typewrite(self, text):
         """
-        Simulate typing the given text with the specified interval between keystrokes.
+        Write the given text to the active application.
+
+        Prefers a single paste operation (copy entire text to clipboard, then send
+        system paste), which avoids per-key intervals and is significantly faster.
+        If clipboard/paste fails for any reason, falls back to per-key typing
+        using the configured input method and key press delay.
 
         Args:
             text (str): The text to type.
         """
+        # First, try to paste everything in one go via the system clipboard.
+        # This is preferred to avoid any inter-key delay and produce instant output.
+        try:
+            # Copy entire text to clipboard in one shot.
+            pyperclip.copy(text)
+            # Send a single paste command (Cmd/Ctrl+V). If successful, we're done.
+            if self.paste_from_clipboard():
+                return
+        except Exception:
+            # If clipboard is unavailable or paste fails, fall back to key-by-key typing below.
+            pass
+
+        # Fallback: type per key using the selected backend and configured delay.
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
         if self.input_method == 'pynput':
             self._typewrite_pynput(text, interval)
@@ -155,15 +174,23 @@ class InputSimulator:
 
         Uses CMD+V on macOS, CTRL+V otherwise. Returns True if a paste command was sent.
         """
-        if self.input_method != 'pynput':
+        # Attempt to send a system paste using pynput regardless of configured input_method.
+        # This mirrors copy behavior and allows single-shot paste even when using ydotool/dotool for typing.
+        controller = None
+        try:
+            controller = self.keyboard if self.input_method == 'pynput' else PynputController()
+        except Exception:
+            controller = None
+
+        if controller is None:
             return False
 
         modifier_key = PynputKey.cmd if sys.platform == 'darwin' else PynputKey.ctrl
         try:
-            self.keyboard.press(modifier_key)
-            self.keyboard.press('v')
-            self.keyboard.release('v')
-            self.keyboard.release(modifier_key)
+            controller.press(modifier_key)
+            controller.press('v')
+            controller.release('v')
+            controller.release(modifier_key)
             time.sleep(0.06)
             ConfigManager.console_print("Sent system paste (Cmd/Ctrl+V) for output.")
             return True
