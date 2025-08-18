@@ -19,7 +19,7 @@ from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
 import pyperclip
-from openrouter_helper import generate_with_openrouter
+from llm_helper import generate_with_llm
 
 
 class WhisperWriterApp(QObject):
@@ -276,9 +276,9 @@ class WhisperWriterApp(QObject):
             ConfigManager.console_print(
                 f"Transcription complete (prompt mode) | len(transcription)={len(transcription_text)} | copy_sent={copy_sent} | len(clipboard)={len(clipboard_text)}"
             )
-            final_output = generate_with_openrouter(clipboard_text, transcription_text) or ''
+            final_output = generate_with_llm(clipboard_text, transcription_text) or ''
             if not final_output:
-                ConfigManager.console_print("OpenRouter returned empty result. Falling back to plain transcription.")
+                ConfigManager.console_print("LLM provider returned empty result. Falling back to plain transcription.")
                 final_output = transcription_text
         else:
             # Normal mode: just paste the transcription as-is
@@ -397,6 +397,39 @@ class WhisperWriterApp(QObject):
 
     def _handle_inline_prompt_submit_on_ui(self, instructions_text: str):
         import pyperclip as _pc
+        # If a preview has already been generated and is visible, paste it directly
+        # instead of generating again. This makes Enter act as "paste preview" when
+        # the preview panel shows content.
+    
+        try:
+            if self.prompt_popup:
+                preview_visible = self.prompt_popup.result_view.isVisible()
+                preview_text = (self.prompt_popup.result_view.toPlainText() or '').strip()
+            else:
+                preview_visible = False
+                preview_text = ''
+        except Exception:
+            preview_visible = False
+            preview_text = ''
+        if preview_visible and preview_text:
+            # Close popup so focus returns to the previous app, then paste preview
+            if self.prompt_popup:
+                # Ensure loader is off in case it was left on
+                self.prompt_popup.set_loading(False)
+                self.prompt_popup.close()
+                try:
+                    self.prompt_popup.reset()
+                except Exception:
+                    pass
+            # Paste with clipboard verification and fallback to typing
+            self._paste_with_verification_and_fallback(preview_text)
+            if ConfigManager.get_config_value('misc', 'noise_on_completion'):
+                play_beep()
+            try:
+                self.key_listener.start()
+            except Exception:
+                pass
+            return
         # Read context from clipboard after earlier copy
         context_text = (_pc.paste() or '').strip()
         if not context_text and hasattr(self, 'app'):
@@ -409,7 +442,7 @@ class WhisperWriterApp(QObject):
             self.prompt_popup.set_loading(True)
         # Start background completion so UI stays responsive
         def _worker():
-            final_output = generate_with_openrouter(context_text, instructions_text) or ''
+            final_output = generate_with_llm(context_text, instructions_text) or ''
             self.inlinePromptReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -427,12 +460,12 @@ class WhisperWriterApp(QObject):
             self.prompt_popup.set_loading(True)
         # Start background preview computation
         def _worker():
-            final_output = generate_with_openrouter(context_text, instructions_text) or ''
+            final_output = generate_with_llm(context_text, instructions_text) or ''
             self.inlinePreviewReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
 
     def _complete_inline_preview(self, context_text: str, instructions_text: str):
-        final_output = generate_with_openrouter(context_text, instructions_text) or ''
+        final_output = generate_with_llm(context_text, instructions_text) or ''
         if not final_output:
             final_output = ''
         if self.prompt_popup:
@@ -440,7 +473,7 @@ class WhisperWriterApp(QObject):
             self.prompt_popup.set_result_text(final_output)
 
     def _complete_inline_prompt_after_focus(self, context_text: str, instructions_text: str):
-        final_output = generate_with_openrouter(context_text, instructions_text) or ''
+        final_output = generate_with_llm(context_text, instructions_text) or ''
         if not final_output:
             final_output = ''
         # Close popup now so focus returns to previous window
@@ -464,7 +497,8 @@ class WhisperWriterApp(QObject):
         except Exception:
             pass
         # Give the OS a brief moment to settle focus, then paste
-        QTimer.singleShot(50, lambda: self.input_simulator.paste_from_clipboard())
+        # Paste with clipboard verification and fallback to typing
+        self._paste_with_verification_and_fallback(final_output)
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             play_beep()
         # Resume hotkey listening
@@ -498,24 +532,63 @@ class WhisperWriterApp(QObject):
                 self.prompt_popup.reset()
             except Exception:
                 pass
-        # Put result into clipboard and paste
-        try:
-            import pyperclip as _pc
-            _pc.copy(final_output or '')
-        except Exception:
-            pass
-        try:
-            cb = self.app.clipboard()
-            cb.setText(final_output or '')
-        except Exception:
-            pass
-        QTimer.singleShot(50, lambda: self.input_simulator.paste_from_clipboard())
+        # Paste with clipboard verification and fallback to typing
+        self._paste_with_verification_and_fallback(final_output or '')
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             play_beep()
         try:
             self.key_listener.start()
         except Exception:
             pass
+
+    def _paste_with_verification_and_fallback(self, text: str, delay_ms: int = 50):
+        """Attempt to paste by setting clipboard and sending paste.
+
+        If clipboard cannot be set (e.g., Wayland/X11 ownership issues), fall back to typing.
+        """
+        def _attempt():
+            # On Linux desktops, clipboard ownership can be restricted; prefer typing directly.
+            try:
+                if sys.platform.startswith('linux'):
+                    self.input_simulator.typewrite(text)
+                    return
+            except Exception:
+                pass
+            # Try both pyperclip and Qt clipboard
+            try:
+                import pyperclip as _pc
+                _pc.copy(text)
+            except Exception:
+                pass
+            try:
+                cb = self.app.clipboard()
+                cb.setText(text)
+            except Exception:
+                pass
+            # Verify clipboard contents
+            qt_ok = False
+            pc_ok = False
+            try:
+                qt_text = (self.app.clipboard().text() or '').strip()
+                qt_ok = (qt_text == (text or '').strip())
+            except Exception:
+                qt_ok = False
+            try:
+                import pyperclip as _pc
+                pc_text = (_pc.paste() or '').strip()
+                pc_ok = (pc_text == (text or '').strip())
+            except Exception:
+                pc_ok = False
+            # If clipboard seems correct, try system paste; otherwise type
+            if qt_ok or pc_ok:
+                sent = self.input_simulator.paste_from_clipboard()
+                if sent:
+                    return
+            # Fallback: simulate typing
+            self.input_simulator.typewrite(text)
+
+        # Slight delay to allow focus return and clipboard propagation before paste
+        QTimer.singleShot(delay_ms, _attempt)
 
 
 def play_beep():
