@@ -112,7 +112,9 @@ class SettingsWindow(BaseWindow):
         if meta_type == 'bool':
             return self.create_checkbox(current_value, key)
         elif meta_type == 'str' and 'options' in meta:
-            return self.create_combobox(current_value, meta['options'])
+            # Make openrouter.model and openai.model editable so users can type any model name, while keeping dropdown suggestions.
+            editable = ((category == 'openrouter' or category == 'openai') and key == 'model')
+            return self.create_combobox(current_value, meta['options'], editable)
         elif meta_type == 'str':
             return self.create_line_edit(current_value, key, category, sub_category)
         elif meta_type == 'text':
@@ -128,12 +130,13 @@ class SettingsWindow(BaseWindow):
             widget.setObjectName('model_options_use_api_input')
         return widget
 
-    def create_combobox(self, value, options):
+    def create_combobox(self, value, options, editable=False):
         widget = QComboBox()
+        widget.setEditable(editable)  # Allow free text for openrouter.model only
         widget.addItems(options)
         widget.setCurrentText(value)
         return widget
-
+    
     def create_line_edit(self, value, key=None, category=None, sub_category=None):
         widget = QLineEdit(value)
         if key == 'api_key':
@@ -144,6 +147,8 @@ class SettingsWindow(BaseWindow):
                 env_value = os.getenv('OPENAI_API_KEY')
             elif category == 'openrouter':
                 env_value = os.getenv('OPENROUTER_API_KEY')
+            elif category == 'openai':
+                env_value = os.getenv('OPENAI_API_KEY')
             if env_value:
                 widget.setText(env_value)
         elif key == 'model_path':
@@ -197,13 +202,18 @@ class SettingsWindow(BaseWindow):
         # Resolve absolute .env path at project root to ensure consistent writes
         env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
-        # Save the OpenAI API key to the .env file
-        openai_api_key = ConfigManager.get_config_value('model_options', 'api', 'api_key') or ''
-        set_key(env_path, 'OPENAI_API_KEY', openai_api_key)
-        os.environ['OPENAI_API_KEY'] = openai_api_key
-
-        # Remove the OpenAI API key from the config
-        ConfigManager.set_config_value(None, 'model_options', 'api', 'api_key')
+        # Save the OpenAI API key(s) to the .env file
+        openai_api_key = (
+            ConfigManager.get_config_value('openai', 'api_key')
+            or ConfigManager.get_config_value('model_options', 'api', 'api_key')
+            or ''
+        )
+        if openai_api_key:
+            set_key(env_path, 'OPENAI_API_KEY', openai_api_key)
+            os.environ['OPENAI_API_KEY'] = openai_api_key
+            # Remove copies from configs
+            ConfigManager.set_config_value(None, 'openai', 'api_key')
+            ConfigManager.set_config_value(None, 'model_options', 'api', 'api_key')
 
         # Save the OpenRouter API key to the .env file
         openrouter_api_key = ConfigManager.get_config_value('openrouter', 'api_key') or ''
