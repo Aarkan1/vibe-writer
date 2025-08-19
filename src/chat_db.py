@@ -119,6 +119,22 @@ class ChatDB:
             conn.close()
 
     @classmethod
+    def delete_chat(cls, chat_id: int) -> None:
+        """Delete a chat and all its messages.
+
+        We explicitly delete from `messages` first to avoid depending on
+        SQLite's foreign key cascade setting in different environments.
+        """
+        conn = cls._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+            cur.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
     def add_message(cls, chat_id: int, role: str, content: str) -> int:
         conn = cls._connect()
         try:

@@ -394,6 +394,11 @@ class VibeWriterApp(QObject):
 
     def _do_show_inline_popup(self):
         self._ensure_prompt_popup()
+        # Default to a fresh ephemeral chat until a message is sent
+        try:
+            self.prompt_popup.start_new_ephemeral_session()
+        except Exception:
+            pass
         # Ensure the text area is empty every time it opens
         try:
             self.prompt_popup.reset()

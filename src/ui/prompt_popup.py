@@ -1,7 +1,7 @@
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent, QCoreApplication
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent, QCoreApplication, QPoint, QPropertyAnimation, QEasingCurve
 from utils import ConfigManager, sanitize_text_for_output
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView, QMenu, QInputDialog, QLineEdit
 from chat_db import ChatDB
 import threading
 from llm_helper import generate_with_llm
@@ -109,29 +109,58 @@ class PromptPopup(QWidget):
 		top_row = QHBoxLayout()
 		top_row.setContentsMargins(0, 0, 0, 0)
 		top_row.setSpacing(6)
+		# Sidebar toggle icon (hamburger)
+		self.sidebar_toggle_btn = QToolButton(self.sidebar)
+		self.sidebar_toggle_btn.setText("☰")
+		self.sidebar_toggle_btn.setToolTip("Show/Hide chats")
+		self.sidebar_toggle_btn.setStyleSheet("QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 14px; padding: 0 4px; }")
+		self.sidebar_toggle_btn.clicked.connect(lambda: self._toggle_sidebar())
 		self.chats_label = QLabel("Chats")
 		self.chats_label.setStyleSheet("color: #DDE2E7; font-size: 12px;")
 		self.new_chat_btn = QToolButton(self.sidebar)
 		self.new_chat_btn.setText("+ New")
 		self.new_chat_btn.setStyleSheet("QToolButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 6px; padding: 2px 6px; font-size: 11px; }")
 		self.new_chat_btn.clicked.connect(lambda: self._create_new_chat())
+		top_row.addWidget(self.sidebar_toggle_btn)
 		top_row.addWidget(self.chats_label)
 		top_row.addStretch(1)
 		top_row.addWidget(self.new_chat_btn)
 		side_v.addLayout(top_row)
 		self.chat_list = QListWidget(self.sidebar)
+		# Styling closer to ChatGPT's sidebar
 		self.chat_list.setStyleSheet(
-			"QListWidget { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; color: #E8EAED; font-size: 12px; }"
+			"QListWidget { background: rgba(255,255,255,0.03); border: 1px solid #2E333B; border-radius: 8px; color: #E8EAED; font-size: 12px; }"
+			" QListWidget::item { padding: 8px 10px; border-radius: 6px; }"
+			" QListWidget::item:selected { background: rgba(255,255,255,0.10); }"
+			" QListWidget::item:hover { background: rgba(255,255,255,0.06); }"
 		)
+		# Keep names on one line with ellipsis and disable horizontal scrollbars.
+		try:
+			self.chat_list.setTextElideMode(Qt.ElideRight)
+			self.chat_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+			# Force single-line display; QListWidget respects the item's text metrics
+			# We avoid word-wrapping by default, but ensure uniform row heights.
+			self.chat_list.setUniformItemSizes(True)
+		except Exception:
+			pass
 		self.chat_list.itemClicked.connect(self._on_chat_item_clicked)
 		# Enable inline rename: double-click or F2
 		try:
 			self.chat_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
 			self.chat_list.itemChanged.connect(self._on_chat_item_changed)
+			# Context menu per item (right-click)
+			self.chat_list.setContextMenuPolicy(Qt.CustomContextMenu)
+			self.chat_list.customContextMenuRequested.connect(self._on_chat_list_context_menu)
 		except Exception:
 			pass
-		# Keep sidebar compact but usable
-		self.sidebar.setFixedWidth(180)
+		# Keep sidebar at a fixed width when visible to avoid layout jitter.
+		# We still animate open/close by temporarily relaxing the minimum width.
+		self._sidebar_target_width = 160
+		# Start with a fixed width so it never grows wider during content changes
+		self.sidebar.setMinimumWidth(self._sidebar_target_width)
+		self.sidebar.setMaximumWidth(self._sidebar_target_width)
+		# Animation handle kept as a field to avoid garbage collection.
+		self._sidebar_anim = None
 		side_v.addWidget(self.chat_list, 1)
 
 		# --- Right Content: existing popup UI in a container ---
@@ -142,7 +171,20 @@ class PromptPopup(QWidget):
 
 		self.hint_label = QLabel("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
 		self.hint_label.setStyleSheet("color: #B5B9C0; font-size: 12px;")
-		layout.addWidget(self.hint_label)
+		# Add a header row with a global sidebar toggle so it remains available
+		# even when the sidebar is hidden.
+		header_row = QHBoxLayout()
+		header_row.setContentsMargins(0, 0, 0, 0)
+		header_row.setSpacing(6)
+		self.header_toggle_btn = QToolButton(right_container)
+		self.header_toggle_btn.setText("☰")
+		self.header_toggle_btn.setToolTip("Show/Hide chats")
+		self.header_toggle_btn.setStyleSheet("QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 14px; padding: 0 4px; }")
+		self.header_toggle_btn.clicked.connect(lambda: self._toggle_sidebar())
+		header_row.addWidget(self.header_toggle_btn)
+		header_row.addWidget(self.hint_label)
+		header_row.addStretch(1)
+		layout.addLayout(header_row)
 
 		# --- Accordion: Clipboard context preview (read-only) ---
 		self.clipboard_header = QToolButton(self)
@@ -279,6 +321,9 @@ class PromptPopup(QWidget):
 		# while the user is holding the recording combo.
 		self._space_suppress_mods = self._build_space_suppression_rules()
 
+		# Keep a reference to scroll animations to prevent garbage collection.
+		self._messages_scroll_anim = None
+
 		# Enable click-drag to move the popup (frameless window)
 		# We allow dragging from the background and the hint label so we don't
 		# interfere with text selection inside the editors.
@@ -297,6 +342,139 @@ class PromptPopup(QWidget):
 		try:
 			ChatDB.initialize()
 			self._load_chats_and_select_latest()
+		except Exception:
+			pass
+
+	def _toggle_sidebar(self):
+		"""Animate the chats sidebar open/close over 200ms for a smooth slide."""
+		try:
+			want_show = not self.sidebar.isVisible()
+			self._animate_sidebar(want_show, duration_ms=200)
+		except Exception:
+			pass
+
+	def _animate_sidebar(self, show: bool, duration_ms: int = 200):
+		"""Animate sidebar width to slide in/out.
+
+		We animate the sidebar's maximumWidth from its current width to either 0
+		(hide) or the stored target width (show). We keep the widget visible while
+		animating, and only hide it at the end when closing, so the slide looks smooth.
+		"""
+		try:
+			# Allow animation by relaxing the minimum width during the transition
+			self.sidebar.setMinimumWidth(0)
+			# Stop any running animation and capture current width as start.
+			if self._sidebar_anim is not None:
+				try:
+					self._sidebar_anim.stop()
+				except Exception:
+					pass
+			start_w = max(0, int(self.sidebar.width()))
+			end_w = self._sidebar_target_width if show else 0
+			# Ensure visible before expanding so animation can be seen.
+			if show and not self.sidebar.isVisible():
+				self.sidebar.setVisible(True)
+				# Start from 0 if fully hidden
+				start_w = 0
+			# Configure animation on maximumWidth to play nicely with layouts.
+			self._sidebar_anim = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
+			self._sidebar_anim.setDuration(max(0, int(duration_ms)))
+			try:
+				self._sidebar_anim.setEasingCurve(QEasingCurve.InOutCubic)
+			except Exception:
+				pass
+			self._sidebar_anim.setStartValue(start_w)
+			self._sidebar_anim.setEndValue(end_w)
+			# When hiding completes, actually hide the widget to free space from tab focus.
+			def _on_finished():
+				if not show:
+					# Collapsed state: keep width constraints at 0 and hide
+					try:
+						self.sidebar.setMaximumWidth(0)
+						self.sidebar.setMinimumWidth(0)
+					except Exception:
+						pass
+					self.sidebar.setVisible(False)
+				else:
+					# Expanded state: lock to a fixed width so it never stretches during loading
+					try:
+						self.sidebar.setMaximumWidth(self._sidebar_target_width)
+						self.sidebar.setMinimumWidth(self._sidebar_target_width)
+					except Exception:
+						pass
+				# Keep internal state clean
+				self._sidebar_anim = None
+			try:
+				self._sidebar_anim.finished.connect(_on_finished)
+			except Exception:
+				# Fallback: apply final visibility immediately if signals fail
+				if not show:
+					self.sidebar.setVisible(False)
+					try:
+						self.sidebar.setMaximumWidth(0)
+						self.sidebar.setMinimumWidth(0)
+					except Exception:
+						pass
+				else:
+					try:
+						self.sidebar.setMaximumWidth(self._sidebar_target_width)
+						self.sidebar.setMinimumWidth(self._sidebar_target_width)
+					except Exception:
+						pass
+			self._sidebar_anim.start()
+		except Exception:
+			# On any failure, fallback to immediate toggle
+			self.sidebar.setVisible(show)
+			try:
+				if show:
+					self.sidebar.setMaximumWidth(self._sidebar_target_width)
+					self.sidebar.setMinimumWidth(self._sidebar_target_width)
+				else:
+					self.sidebar.setMaximumWidth(0)
+					self.sidebar.setMinimumWidth(0)
+			except Exception:
+				pass
+
+	def _on_chat_list_context_menu(self, pos):
+		"""Open per-item menu with Delete action on right-click."""
+		try:
+			global_pos = self.chat_list.mapToGlobal(pos)
+			item = self.chat_list.itemAt(pos)
+			if item is None:
+				return
+			menu = QMenu(self)
+			open_action = menu.addAction("Open")
+			rename_action = menu.addAction("Rename…")
+			delete_action = menu.addAction("Delete")
+			action = menu.exec_(global_pos)
+			if action == delete_action:
+				self._delete_chat_from_item(item)
+			elif action == open_action:
+				self._set_current_chat_from_item(item)
+			elif action == rename_action:
+				# Prompt simple rename dialog
+				text, ok = QInputDialog.getText(self, "Rename chat", "Name:", QLineEdit.Normal, item.text())
+				if ok:
+					item.setText(text)
+					self._on_chat_item_changed(item)
+		except Exception:
+			pass
+
+	def _delete_chat_from_item(self, item: QListWidgetItem):
+		"""Delete chat in DB and update the list, selecting the next available chat."""
+		try:
+			cid = int(item.data(Qt.UserRole))
+			ChatDB.delete_chat(cid)
+			row = self.chat_list.row(item)
+			self.chat_list.takeItem(row)
+			# Select a sensible next item
+			new_row = max(0, min(row, self.chat_list.count() - 1))
+			if self.chat_list.count() > 0:
+				self.chat_list.setCurrentRow(new_row)
+				self._set_current_chat_from_item(self.chat_list.item(new_row))
+			else:
+				# No chats remain; create a new empty one
+				self._create_new_chat()
 		except Exception:
 			pass
 
@@ -757,12 +935,15 @@ class PromptPopup(QWidget):
 		container = self._create_bubble(self._last_assistant_text, is_user=False)
 		self._insert_message_widget(container)
 		# Trigger auto-name generation once per chat after the first assistant reply
+		# Guard: only when the chat has at most two messages (first user + first assistant)
+		# This ensures we never regenerate names on later turns or reopenings.
 		try:
 			if (self._current_chat_id is not None) and (int(self._current_chat_id) not in self._autoname_run_chat_ids):
-				self._autoname_run_chat_ids.add(int(self._current_chat_id))
-				# Apply a provisional title immediately for instant feedback
-				self._apply_provisional_title()
-				self._maybe_generate_chat_title_async()
+				if len(self._history_messages) <= 2:
+					self._autoname_run_chat_ids.add(int(self._current_chat_id))
+					# Apply a provisional title immediately for instant feedback
+					self._apply_provisional_title()
+					self._maybe_generate_chat_title_async()
 		except Exception:
 			pass
 
@@ -877,12 +1058,14 @@ class PromptPopup(QWidget):
 		self._streaming_container = None
 		self._streaming_text = ''
 		# Trigger auto-name generation once per chat (works for streaming path too)
+		# Guard: only when the chat has at most two messages (first user + first assistant)
 		try:
 			if (self._current_chat_id is not None) and (int(self._current_chat_id) not in self._autoname_run_chat_ids):
-				self._autoname_run_chat_ids.add(int(self._current_chat_id))
-				# Apply a provisional title immediately for instant feedback
-				self._apply_provisional_title()
-				self._maybe_generate_chat_title_async()
+				if len(self._history_messages) <= 2:
+					self._autoname_run_chat_ids.add(int(self._current_chat_id))
+					# Apply a provisional title immediately for instant feedback
+					self._apply_provisional_title()
+					self._maybe_generate_chat_title_async()
 		except Exception:
 			pass
 
@@ -949,13 +1132,23 @@ class PromptPopup(QWidget):
 		return ''
 
 	def _refresh_chat_list_preserve_selection(self):
-		"""Reload chat list from DB and keep the selected chat highlighted."""
+		"""Reload chat list from DB and keep the selected chat highlighted.
+
+		If no current chat is selected (ephemeral session), do not auto-select any row.
+		This preserves the behavior of defaulting to a new chat until a message is sent.
+		"""
 		try:
 			chats = ChatDB.list_chats()
 			self.chat_list.clear()
-			selected_row = 0
+			selected_row = None
 			for idx, chat in enumerate(chats):
-				item = QListWidgetItem(str(chat.get('name') or ''))
+				name = str(chat.get('name') or '')
+				item = QListWidgetItem(name)
+				# Show full name on hover
+				try:
+					item.setToolTip(name)
+				except Exception:
+					pass
 				# Mark editable so users can rename by clicking again or pressing F2
 				try:
 					item.setFlags(item.flags() | Qt.ItemIsEditable)
@@ -963,42 +1156,64 @@ class PromptPopup(QWidget):
 					pass
 				item.setData(Qt.UserRole, int(chat.get('id') or 0))
 				self.chat_list.addItem(item)
-				if self._current_chat_id and int(chat.get('id') or 0) == int(self._current_chat_id):
+				if (self._current_chat_id is not None) and (int(chat.get('id') or 0) == int(self._current_chat_id)):
 					selected_row = idx
-			self.chat_list.setCurrentRow(selected_row)
+			# Only select if we have an explicit current chat id; otherwise keep no selection
+			if selected_row is not None:
+				self.chat_list.setCurrentRow(int(selected_row))
+			else:
+				try:
+					self.chat_list.clearSelection()
+				except Exception:
+					pass
 		except Exception:
 			pass
 
 	def _load_chats_and_select_latest(self):
-		"""Initial population: load chats and select most recent, or create one."""
+		"""Initial population: load chats into the list without selecting any by default.
+
+		We no longer auto-create or auto-select a chat on startup. The popup defaults
+		to an ephemeral new chat and will only create a DB chat when the first message
+		is actually sent.
+		"""
 		try:
 			chats = ChatDB.list_chats()
 			self.chat_list.clear()
-			if chats:
-				for chat in chats:
-					item = QListWidgetItem(str(chat.get('name') or ''))
-					try:
-						item.setFlags(item.flags() | Qt.ItemIsEditable)
-					except Exception:
-						pass
-					item.setData(Qt.UserRole, int(chat.get('id') or 0))
-					self.chat_list.addItem(item)
-				# Select first row (latest by updated_at desc)
-				self.chat_list.setCurrentRow(0)
-				self._set_current_chat_from_item(self.chat_list.item(0))
-			else:
-				# Create a brand-new empty chat
-				name = 'New Chat'
-				cid = ChatDB.create_chat(name)
+			for chat in chats:
+				name = str(chat.get('name') or '')
 				item = QListWidgetItem(name)
+				try:
+					item.setToolTip(name)
+				except Exception:
+					pass
 				try:
 					item.setFlags(item.flags() | Qt.ItemIsEditable)
 				except Exception:
 					pass
-				item.setData(Qt.UserRole, int(cid))
+				item.setData(Qt.UserRole, int(chat.get('id') or 0))
 				self.chat_list.addItem(item)
-				self.chat_list.setCurrentRow(0)
-				self._set_current_chat_from_item(item)
+			# Ensure no selection by default; user can pick a chat explicitly from the list
+			try:
+				self.chat_list.clearSelection()
+			except Exception:
+				pass
+		except Exception:
+			pass
+
+	def start_new_ephemeral_session(self):
+		"""Prepare the popup to use a fresh in-memory chat until a message is sent.
+
+		We keep `_current_chat_id` as None so the first message sent will create and
+		persist a new chat. If the user closes without sending, a later popup will
+		reuse this unsaved session without creating any DB rows.
+		"""
+		try:
+			self._current_chat_id = None
+			self._current_chat_name = ''
+			try:
+				self.chat_list.clearSelection()
+			except Exception:
+				pass
 		except Exception:
 			pass
 
@@ -1031,8 +1246,9 @@ class PromptPopup(QWidget):
 					self._history_messages.append({ 'role': 'assistant', 'content': content })
 					c = self._create_bubble(content, is_user=False)
 					self._insert_message_widget(c)
-			QTimer.singleShot(50, lambda: None)
-			self._scroll_to_bottom()
+			# After a short delay (let layouts and heights settle), smoothly scroll to bottom
+			# so the latest message is fully visible even for long chats.
+			QTimer.singleShot(200, lambda: self._smooth_scroll_to_bottom(200))
 		except Exception:
 			pass
 
@@ -1063,6 +1279,19 @@ class PromptPopup(QWidget):
 			if self._current_chat_id is None:
 				return
 			cid = int(self._current_chat_id)
+			# Safety guard: only attempt when there are at most two chat messages
+			# (the very first user + assistant pair). If more than two, skip.
+			try:
+				msg_count = 0
+				for _m in self._history_messages:
+					role = (_m.get('role') or '').strip()
+					if role in ('user', 'assistant'):
+						msg_count += 1
+				if msg_count > 2:
+					return
+			except Exception:
+				# On any failure, do not risk re-triggering later
+				return
 			# Prepare content: first user line + first assistant line
 			first_user = ''
 			first_assistant = ''
@@ -1080,7 +1309,7 @@ class PromptPopup(QWidget):
 			user_line = (first_user.splitlines()[0] or '')[:120]
 			assistant_line = (first_assistant.splitlines()[0] or '')[:120]
 			prompt = (
-				"Create a very short, descriptive chat title (max 6 words).\n"
+				"Create a very short, descriptive chat title (max 4 words).\n"
 				"Avoid quotes and punctuation at ends.\n\n"
 				f"First user message: {user_line}\n"
 				f"First assistant reply: {assistant_line}\n\n"
@@ -1265,12 +1494,54 @@ class PromptPopup(QWidget):
 		return container
 
 	def _scroll_to_bottom(self):
-		"""Scroll to the very bottom of the messages area with extra margin."""
+		"""Instantly scroll to the very bottom of the messages area."""
 		try:
 			bar = self.messages_scroll.verticalScrollBar()
-			# Use maximum plus some extra to ensure we really hit the bottom
-			extra_margin = 200  # Add extra pixels to ensure complete scroll
-			bar.setValue(bar.maximum() + extra_margin)
+			bar.setValue(bar.maximum())
+		except Exception:
+			pass
+
+	def _smooth_scroll_to_bottom(self, duration_ms: int = 200, retries: int = 2, retry_delay_ms: int = 150):
+		"""Smoothly scroll to bottom using a property animation on the scrollbar value.
+
+		If the content grows further during/after the animation (e.g., long chats as
+		text layouts finalize), we retry a limited number of times to reach the true
+		bottom.
+		"""
+		try:
+			bar = self.messages_scroll.verticalScrollBar()
+			start = int(bar.value())
+			end = int(bar.maximum())
+			if end <= start:
+				return
+			# Stop any running animation
+			if self._messages_scroll_anim is not None:
+				try:
+					self._messages_scroll_anim.stop()
+				except Exception:
+					pass
+			self._messages_scroll_anim = QPropertyAnimation(bar, b"value", self)
+			self._messages_scroll_anim.setDuration(max(0, int(duration_ms)))
+			try:
+				self._messages_scroll_anim.setEasingCurve(QEasingCurve.InOutCubic)
+			except Exception:
+				pass
+			self._messages_scroll_anim.setStartValue(start)
+			self._messages_scroll_anim.setEndValue(end)
+			def _on_finished():
+				try:
+					current = int(bar.value())
+					new_max = int(bar.maximum())
+					if retries > 0 and current < new_max:
+						QTimer.singleShot(max(0, int(retry_delay_ms)),
+											lambda: self._smooth_scroll_to_bottom(duration_ms, retries - 1, retry_delay_ms))
+				finally:
+					self._messages_scroll_anim = None
+			try:
+				self._messages_scroll_anim.finished.connect(_on_finished)
+			except Exception:
+				self._messages_scroll_anim = None
+			self._messages_scroll_anim.start()
 		except Exception:
 			pass
 
