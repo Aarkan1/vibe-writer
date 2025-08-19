@@ -466,9 +466,9 @@ class VibeWriterApp(QObject):
                 final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePromptReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
-        # Prepare live assistant bubble for streaming output
+        # Prepare live assistant bubble for streaming output if enabled
         try:
-            if self.prompt_popup:
+            if self.prompt_popup and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
                 self.prompt_popup.begin_streaming_assistant_message()
         except Exception:
             pass
@@ -513,9 +513,9 @@ class VibeWriterApp(QObject):
                 final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
             self.inlinePreviewReady.emit(final_output)
         threading.Thread(target=_worker, daemon=True).start()
-        # Create live assistant bubble to receive streaming deltas
+        # Create live assistant bubble to receive streaming deltas if enabled
         try:
-            if self.prompt_popup:
+            if self.prompt_popup and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
                 self.prompt_popup.begin_streaming_assistant_message()
         except Exception:
             pass

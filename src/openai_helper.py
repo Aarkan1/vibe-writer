@@ -220,8 +220,78 @@ def stream_with_openai(
         )
 
         if resp.status_code != 200:
+            # If streaming is not enabled or fails, fall back to non-streaming request
             ConfigManager.console_print(f'OpenAI HTTP (stream) {resp.status_code}: {resp.text[:200]}')
-            return ''
+            ConfigManager.console_print('OpenAI: falling back to non-streaming response due to HTTP error.')
+            fallback_text = generate_with_openai(
+                context_text=context_text,
+                instructions_text=instructions_text,
+                model=chosen_model,
+                history_messages=history_messages,
+            )
+            # If streaming was enabled and fallback produced output, disable streaming for future calls
+            try:
+                if fallback_text and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
+                    ConfigManager.console_print('OpenAI: disabling streaming for this session after successful fallback.')
+                    ConfigManager.set_config_value(False, 'llm', 'use_streaming')
+                    ConfigManager.save_config()
+            except Exception:
+                pass
+            if fallback_text and on_delta:
+                try:
+                    on_delta(fallback_text)
+                except Exception:
+                    pass
+            return fallback_text
+
+        # Detect if server did not return SSE; if not, parse JSON and/or fall back
+        content_type = (resp.headers.get('Content-Type') or resp.headers.get('content-type') or '').lower()
+        if 'text/event-stream' not in content_type:
+            ConfigManager.console_print(f'OpenAI: non-SSE response detected (Content-Type={content_type or "unknown"}). Attempting JSON parse or fallback...')
+            try:
+                data = resp.json()
+                choices = data.get('choices') or []
+                message = (choices[0] or {}).get('message') or {}
+                text = (message.get('content') or '').strip()
+                if text:
+                    # Disable streaming since server did not provide SSE
+                    try:
+                        if ConfigManager.get_config_value('llm', 'use_streaming') is not False:
+                            ConfigManager.console_print('OpenAI: disabling streaming for this session (non-SSE response).')
+                            ConfigManager.set_config_value(False, 'llm', 'use_streaming')
+                            ConfigManager.save_config()
+                    except Exception:
+                        pass
+                    if on_delta:
+                        try:
+                            on_delta(text)
+                        except Exception:
+                            pass
+                    ConfigManager.console_print('OpenAI (fallback non-SSE) response content (truncated to 300):\n' + text[:300])
+                    return text
+            except Exception:
+                # Ignore and fall through to explicit fallback
+                pass
+            # Explicit non-stream fallback request
+            fallback_text = generate_with_openai(
+                context_text=context_text,
+                instructions_text=instructions_text,
+                model=chosen_model,
+                history_messages=history_messages,
+            )
+            try:
+                if fallback_text and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
+                    ConfigManager.console_print('OpenAI: disabling streaming for this session after successful explicit fallback.')
+                    ConfigManager.set_config_value(False, 'llm', 'use_streaming')
+                    ConfigManager.save_config()
+            except Exception:
+                pass
+            if fallback_text and on_delta:
+                try:
+                    on_delta(fallback_text)
+                except Exception:
+                    pass
+            return fallback_text
 
         # Force UTF-8 decoding for SSE stream to prevent mojibake
         try:
@@ -259,7 +329,28 @@ def stream_with_openai(
 
         if full_text:
             ConfigManager.console_print('OpenAI streamed response content (truncated to 300):\n' + full_text[:300])
-        return full_text
+            return full_text
+        # If we reach here with no streamed content, fall back to non-streaming
+        ConfigManager.console_print('OpenAI: no streamed content received; falling back to non-streaming response.')
+        fallback_text = generate_with_openai(
+            context_text=context_text,
+            instructions_text=instructions_text,
+            model=chosen_model,
+            history_messages=history_messages,
+        )
+        try:
+            if fallback_text and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
+                ConfigManager.console_print('OpenAI: disabling streaming for this session after empty stream fallback.')
+                ConfigManager.set_config_value(False, 'llm', 'use_streaming')
+                ConfigManager.save_config()
+        except Exception:
+            pass
+        if fallback_text and on_delta:
+            try:
+                on_delta(fallback_text)
+            except Exception:
+                pass
+        return fallback_text
     except Exception as e:
         ConfigManager.console_print(f'OpenAI streaming request failed: {e}')
         return ''

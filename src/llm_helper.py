@@ -28,6 +28,11 @@ def stream_with_llm(
     """
     Stream with the configured provider and forward deltas.
     """
+    # Respect streaming toggle. If disabled, route to non-streaming.
+    use_streaming = bool(ConfigManager.get_config_value('llm', 'use_streaming') is not False)
+    if not use_streaming:
+        return generate_with_llm(context_text, instructions_text, model=model, history_messages=history_messages)
+
     provider = (ConfigManager.get_config_value('llm', 'provider') or 'openrouter').strip().lower()
     if provider == 'openai':
         return stream_with_openai(context_text, instructions_text, model=model, history_messages=history_messages, on_delta=on_delta)

@@ -214,6 +214,10 @@ llm:
     options:
       - openrouter
       - openai
+  use_streaming:
+    value: true
+    type: bool
+    description: "When true, attempt to stream responses. If streaming fails once, the app will automatically disable streaming for the remainder of the session."
 
 # OpenAI settings (used for clipboard-context prompting)
 openai:
