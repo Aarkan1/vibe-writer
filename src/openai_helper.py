@@ -137,6 +137,7 @@ def stream_with_openai(
     model: Optional[str] = None,
     history_messages: Optional[List[Dict[str, str]]] = None,
     on_delta: Optional[Callable[[str], None]] = None,
+    cancel_event=None,
 ) -> str:
     """
     Stream responses from OpenAI and invoke on_delta for each content chunk.
@@ -301,6 +302,16 @@ def stream_with_openai(
 
         full_text = ''
         for raw_line in resp.iter_lines(decode_unicode=True):
+            # Allow cooperative cancellation during streaming
+            try:
+                if cancel_event is not None and getattr(cancel_event, 'is_set', None) and cancel_event.is_set():
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    return full_text
+            except Exception:
+                pass
             if not raw_line:
                 continue
             line = raw_line.strip()

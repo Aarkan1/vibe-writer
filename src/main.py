@@ -112,6 +112,8 @@ class VibeWriterApp(QObject):
 
         # Inline prompt popup UI (lazy-initialized when needed)
         self.prompt_popup = None
+        # Track active inline LLM request cancellation
+        self.current_inline_cancel_event = None
 
         # Connect thread-safe UI signals
         self.showInlinePopupSignal.connect(self._show_inline_popup_on_ui)
@@ -345,6 +347,13 @@ class VibeWriterApp(QObject):
 
     def on_inline_prompt_cancelled(self):
         """Close popup and resume listening without action."""
+        # Signal any active streaming worker to stop
+        try:
+            evt = getattr(self, 'current_inline_cancel_event', None)
+            if evt is not None:
+                evt.set()
+        except Exception:
+            pass
         self.closeInlinePopupSignal.emit()
 
     # ---------------- UI-thread helpers for inline popup ---------------- #
@@ -410,6 +419,7 @@ class VibeWriterApp(QObject):
 
     def _handle_inline_prompt_submit_on_ui(self, instructions_text: str):
         import pyperclip as _pc
+        import threading as _threading
         # Ctrl+Enter (submit): If there is a previous assistant message, paste it.
         # Otherwise, generate now and paste when ready.
         last_assistant = ''
@@ -441,6 +451,14 @@ class VibeWriterApp(QObject):
                 context_text = (self.app.clipboard().text() or '').strip()
             except Exception:
                 context_text = ''
+        # If a previous request is active, cancel it and abort any streaming UI bubble
+        try:
+            if self.current_inline_cancel_event is not None:
+                self.current_inline_cancel_event.set()
+            if self.prompt_popup:
+                self.prompt_popup.abort_streaming_assistant_message()
+        except Exception:
+            pass
         # Add user's message bubble, clear input, keep focus, and show loader while we compute
         if self.prompt_popup:
             try:
@@ -454,7 +472,9 @@ class VibeWriterApp(QObject):
                 pass
             self.prompt_popup.set_loading(True)
         # Start background completion so UI stays responsive
-        def _worker():
+        cancel_event = _threading.Event()
+        self.current_inline_cancel_event = cancel_event
+        def _worker(my_event):
             # Snapshot chat history to include prior turns in the request
             try:
                 history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
@@ -463,14 +483,26 @@ class VibeWriterApp(QObject):
             # Prefer streaming; fall back to non-stream on failure
             def _on_delta(s: str):
                 try:
-                    self.inlineStreamDelta.emit(s)
+                    # Drop deltas if this request was cancelled
+                    if not my_event.is_set():
+                        self.inlineStreamDelta.emit(s)
                 except Exception:
                     pass
-            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta) or ''
-            if not final_output:
+            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
+            if my_event.is_set():
+                return
+            if not final_output and not my_event.is_set():
                 final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
-            self.inlinePromptReady.emit(final_output)
-        threading.Thread(target=_worker, daemon=True).start()
+            if not my_event.is_set():
+                self.inlinePromptReady.emit(final_output)
+            # Clear active event if still current
+            try:
+                if self.current_inline_cancel_event is my_event:
+                    self.current_inline_cancel_event = None
+            except Exception:
+                pass
+        _t = _threading.Thread(target=_worker, args=(cancel_event,), daemon=True)
+        _t.start()
         # Prepare live assistant bubble for streaming output if enabled
         try:
             if self.prompt_popup and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
@@ -480,6 +512,7 @@ class VibeWriterApp(QObject):
 
     def _handle_inline_preview_on_ui(self, instructions_text: str):
         import pyperclip as _pc
+        import threading as _threading
         # Add user's message bubble, clear input, keep focus, then read context
         if self.prompt_popup:
             try:
@@ -497,11 +530,21 @@ class VibeWriterApp(QObject):
                 context_text = (self.app.clipboard().text() or '').strip()
             except Exception:
                 context_text = ''
+        # If a previous request is active, cancel it and abort any streaming UI bubble
+        try:
+            if self.current_inline_cancel_event is not None:
+                self.current_inline_cancel_event.set()
+            if self.prompt_popup:
+                self.prompt_popup.abort_streaming_assistant_message()
+        except Exception:
+            pass
         # Show loader but keep popup open
         if self.prompt_popup:
             self.prompt_popup.set_loading(True)
         # Start background preview computation
-        def _worker():
+        cancel_event = _threading.Event()
+        self.current_inline_cancel_event = cancel_event
+        def _worker(my_event):
             # Include current chat history for better previews
             try:
                 history = self.prompt_popup.get_chat_history_messages() if self.prompt_popup else []
@@ -510,14 +553,24 @@ class VibeWriterApp(QObject):
             # Stream first; fall back to non-stream
             def _on_delta(s: str):
                 try:
-                    self.inlineStreamDelta.emit(s)
+                    if not my_event.is_set():
+                        self.inlineStreamDelta.emit(s)
                 except Exception:
                     pass
-            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta) or ''
-            if not final_output:
+            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
+            if my_event.is_set():
+                return
+            if not final_output and not my_event.is_set():
                 final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
-            self.inlinePreviewReady.emit(final_output)
-        threading.Thread(target=_worker, daemon=True).start()
+            if not my_event.is_set():
+                self.inlinePreviewReady.emit(final_output)
+            try:
+                if self.current_inline_cancel_event is my_event:
+                    self.current_inline_cancel_event = None
+            except Exception:
+                pass
+        _t = _threading.Thread(target=_worker, args=(cancel_event,), daemon=True)
+        _t.start()
         # Create live assistant bubble to receive streaming deltas if enabled
         try:
             if self.prompt_popup and (ConfigManager.get_config_value('llm', 'use_streaming') is not False):
@@ -577,7 +630,18 @@ class VibeWriterApp(QObject):
             pass
 
     def _close_inline_popup_on_ui(self):
+        # Cancel any active inline request and abort streaming UI
+        try:
+            evt = getattr(self, 'current_inline_cancel_event', None)
+            if evt is not None:
+                evt.set()
+        except Exception:
+            pass
         if self.prompt_popup:
+            try:
+                self.prompt_popup.abort_streaming_assistant_message()
+            except Exception:
+                pass
             self.prompt_popup.close()
         try:
             self.key_listener.start()

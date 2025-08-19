@@ -1069,6 +1069,30 @@ class PromptPopup(QWidget):
 		except Exception:
 			pass
 
+	def abort_streaming_assistant_message(self):
+		"""Abort an in-progress streaming assistant message without saving history.
+
+		Stops loader, removes the temporary streaming bubble, and clears streaming state.
+		Used when the user cancels/closes the popup or starts a new request.
+		"""
+		try:
+			self.set_loading(False)
+		except Exception:
+			pass
+		container = self._streaming_container
+		if container is not None:
+			try:
+				# Remove the container from layout and delete
+				self.messages_layout.removeWidget(container)
+				container.setParent(None)
+			except Exception:
+				pass
+		# Clear streaming refs
+		self._streaming_viewer = None
+		self._streaming_bubble = None
+		self._streaming_container = None
+		self._streaming_text = ''
+
 	def get_last_assistant_text(self) -> str:
 		"""Return the most recent assistant message text for paste action."""
 		return self._last_assistant_text or ""

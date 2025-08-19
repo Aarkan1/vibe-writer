@@ -24,6 +24,7 @@ def stream_with_llm(
     model: Optional[str] = None,
     history_messages: Optional[List[Dict[str, str]]] = None,
     on_delta=None,
+    cancel_event=None,
 ) -> str:
     """
     Stream with the configured provider and forward deltas.
@@ -35,6 +36,6 @@ def stream_with_llm(
 
     provider = (ConfigManager.get_config_value('llm', 'provider') or 'openrouter').strip().lower()
     if provider == 'openai':
-        return stream_with_openai(context_text, instructions_text, model=model, history_messages=history_messages, on_delta=on_delta)
-    return stream_with_openrouter(context_text, instructions_text, model=model, history_messages=history_messages, on_delta=on_delta)
+        return stream_with_openai(context_text, instructions_text, model=model, history_messages=history_messages, on_delta=on_delta, cancel_event=cancel_event)
+    return stream_with_openrouter(context_text, instructions_text, model=model, history_messages=history_messages, on_delta=on_delta, cancel_event=cancel_event)
 
