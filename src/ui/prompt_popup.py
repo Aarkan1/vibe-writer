@@ -1,8 +1,10 @@
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent, QCoreApplication
 from utils import ConfigManager, sanitize_text_for_output
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView
 from chat_db import ChatDB
+import threading
+from llm_helper import generate_with_llm
 
 
 class TypingIndicatorWidget(QWidget):
@@ -122,6 +124,12 @@ class PromptPopup(QWidget):
 			"QListWidget { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; color: #E8EAED; font-size: 12px; }"
 		)
 		self.chat_list.itemClicked.connect(self._on_chat_item_clicked)
+		# Enable inline rename: double-click or F2
+		try:
+			self.chat_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
+			self.chat_list.itemChanged.connect(self._on_chat_item_changed)
+		except Exception:
+			pass
 		# Keep sidebar compact but usable
 		self.sidebar.setFixedWidth(180)
 		side_v.addWidget(self.chat_list, 1)
@@ -283,6 +291,9 @@ class PromptPopup(QWidget):
 		# --- Database state: current chat tracking ---
 		self._current_chat_id = None
 		self._current_chat_name = ''
+		# Track which chats have already had auto-name generation triggered
+		self._autoname_run_chat_ids = set()
+		self._suppress_item_changed = False
 		try:
 			ChatDB.initialize()
 			self._load_chats_and_select_latest()
@@ -745,6 +756,15 @@ class PromptPopup(QWidget):
 			pass
 		container = self._create_bubble(self._last_assistant_text, is_user=False)
 		self._insert_message_widget(container)
+		# Trigger auto-name generation once per chat after the first assistant reply
+		try:
+			if (self._current_chat_id is not None) and (int(self._current_chat_id) not in self._autoname_run_chat_ids):
+				self._autoname_run_chat_ids.add(int(self._current_chat_id))
+				# Apply a provisional title immediately for instant feedback
+				self._apply_provisional_title()
+				self._maybe_generate_chat_title_async()
+		except Exception:
+			pass
 
 	def begin_streaming_assistant_message(self):
 		"""Create an empty assistant bubble and prepare to append streamed text."""
@@ -856,6 +876,15 @@ class PromptPopup(QWidget):
 		self._streaming_bubble = None
 		self._streaming_container = None
 		self._streaming_text = ''
+		# Trigger auto-name generation once per chat (works for streaming path too)
+		try:
+			if (self._current_chat_id is not None) and (int(self._current_chat_id) not in self._autoname_run_chat_ids):
+				self._autoname_run_chat_ids.add(int(self._current_chat_id))
+				# Apply a provisional title immediately for instant feedback
+				self._apply_provisional_title()
+				self._maybe_generate_chat_title_async()
+		except Exception:
+			pass
 
 	def get_last_assistant_text(self) -> str:
 		"""Return the most recent assistant message text for paste action."""
@@ -927,6 +956,11 @@ class PromptPopup(QWidget):
 			selected_row = 0
 			for idx, chat in enumerate(chats):
 				item = QListWidgetItem(str(chat.get('name') or ''))
+				# Mark editable so users can rename by clicking again or pressing F2
+				try:
+					item.setFlags(item.flags() | Qt.ItemIsEditable)
+				except Exception:
+					pass
 				item.setData(Qt.UserRole, int(chat.get('id') or 0))
 				self.chat_list.addItem(item)
 				if self._current_chat_id and int(chat.get('id') or 0) == int(self._current_chat_id):
@@ -943,6 +977,10 @@ class PromptPopup(QWidget):
 			if chats:
 				for chat in chats:
 					item = QListWidgetItem(str(chat.get('name') or ''))
+					try:
+						item.setFlags(item.flags() | Qt.ItemIsEditable)
+					except Exception:
+						pass
 					item.setData(Qt.UserRole, int(chat.get('id') or 0))
 					self.chat_list.addItem(item)
 				# Select first row (latest by updated_at desc)
@@ -953,6 +991,10 @@ class PromptPopup(QWidget):
 				name = 'New Chat'
 				cid = ChatDB.create_chat(name)
 				item = QListWidgetItem(name)
+				try:
+					item.setFlags(item.flags() | Qt.ItemIsEditable)
+				except Exception:
+					pass
 				item.setData(Qt.UserRole, int(cid))
 				self.chat_list.addItem(item)
 				self.chat_list.setCurrentRow(0)
@@ -996,6 +1038,127 @@ class PromptPopup(QWidget):
 
 	def _on_chat_item_clicked(self, item: QListWidgetItem):
 		self._set_current_chat_from_item(item)
+
+	def _on_chat_item_changed(self, item: QListWidgetItem):
+		"""Handle inline rename from the list widget."""
+		try:
+			if self._suppress_item_changed:
+				return
+			cid = int(item.data(Qt.UserRole))
+			name = (item.text() or '').strip() or 'Untitled'
+			ChatDB.rename_chat(cid, name)
+			if self._current_chat_id and int(self._current_chat_id) == cid:
+				self._current_chat_name = name
+			self._refresh_chat_list_preserve_selection()
+		except Exception:
+			pass
+
+	def _maybe_generate_chat_title_async(self):
+		"""Generate a concise chat title one time after first reply using LLM.
+
+		We call the same LLM provider with a minimal instruction to craft a short
+		descriptive name using the first user message and first assistant reply.
+		"""
+		try:
+			if self._current_chat_id is None:
+				return
+			cid = int(self._current_chat_id)
+			# Prepare content: first user line + first assistant line
+			first_user = ''
+			first_assistant = ''
+			for m in self._history_messages:
+				role = (m.get('role') or '').strip()
+				content = (m.get('content') or '').strip()
+				if role == 'user' and not first_user and content:
+					first_user = content
+				elif role == 'assistant' and not first_assistant and content:
+					first_assistant = content
+				if first_user and first_assistant:
+					break
+			if not (first_user and first_assistant):
+				return
+			user_line = (first_user.splitlines()[0] or '')[:120]
+			assistant_line = (first_assistant.splitlines()[0] or '')[:120]
+			prompt = (
+				"Create a very short, descriptive chat title (max 6 words).\n"
+				"Avoid quotes and punctuation at ends.\n\n"
+				f"First user message: {user_line}\n"
+				f"First assistant reply: {assistant_line}\n\n"
+				"Title:"
+			)
+			def _worker():
+				try:
+					name = generate_with_llm('', prompt, history_messages=[]).strip()
+					# Sanitize and clamp
+					name = sanitize_text_for_output(name).replace('\n', ' ').strip().strip('"').strip("'")
+					if not name:
+						return
+					# Persist and refresh UI
+					ChatDB.rename_chat(cid, name)
+					QTimer.singleShot(0, lambda: self._apply_new_name_to_list(cid, name))
+				except Exception:
+					pass
+			threading.Thread(target=_worker, daemon=True).start()
+		except Exception:
+			pass
+
+	def _apply_new_name_to_list(self, cid: int, name: str):
+		"""Apply new name to the list widget and internal state if selected."""
+		try:
+			row_to_select = None
+			for i in range(self.chat_list.count()):
+				item = self.chat_list.item(i)
+				if int(item.data(Qt.UserRole) or 0) == cid:
+					self._suppress_item_changed = True
+					item.setText(name)
+					self._suppress_item_changed = False
+					row_to_select = i
+					break
+			if self._current_chat_id and int(self._current_chat_id) == cid:
+				self._current_chat_name = name
+			# Keep the current selection stable and ensure immediate UI reflect
+			if row_to_select is not None:
+				self.chat_list.setCurrentRow(int(row_to_select))
+				try:
+					self.chat_list.viewport().update()
+					QCoreApplication.processEvents()
+				except Exception:
+					pass
+			# Also refresh ordering shortly, but after the immediate UI change is visible
+			QTimer.singleShot(50, lambda: self._refresh_chat_list_preserve_selection())
+		except Exception:
+			self._suppress_item_changed = False
+			pass
+
+	def _apply_provisional_title(self):
+		"""Set a quick, deterministic provisional name based on first lines."""
+		try:
+			if self._current_chat_id is None:
+				return
+			cid = int(self._current_chat_id)
+			first_user = ''
+			first_assistant = ''
+			for m in self._history_messages:
+				role = (m.get('role') or '').strip()
+				content = (m.get('content') or '').strip()
+				if role == 'user' and not first_user and content:
+					first_user = content
+				elif role == 'assistant' and not first_assistant and content:
+					first_assistant = content
+				if first_user and first_assistant:
+					break
+			if not (first_user and first_assistant):
+				return
+			user_line = (first_user.splitlines()[0] or '')[:40]
+			assistant_line = (first_assistant.splitlines()[0] or '')[:40]
+			name = (user_line + ' — ' + assistant_line).strip(' —')
+			name = sanitize_text_for_output(name)
+			if not name:
+				return
+			ChatDB.rename_chat(cid, name)
+			self._apply_new_name_to_list(cid, name)
+		except Exception:
+			pass
 
 	def _create_new_chat(self):
 		try:
