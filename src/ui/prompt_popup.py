@@ -1,7 +1,8 @@
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent
 from utils import ConfigManager, sanitize_text_for_output
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem
+from chat_db import ChatDB
 
 
 class TypingIndicatorWidget(QWidget):
@@ -93,8 +94,42 @@ class PromptPopup(QWidget):
 		self._resize_start_geo = None
 		self._resize_start_mouse = None
 
-		layout = QVBoxLayout(self)
-		layout.setContentsMargins(14, 14, 14, 14)
+		# Root layout now has a left sidebar (chat list) and right content (existing UI)
+		root = QHBoxLayout(self)
+		root.setContentsMargins(14, 14, 14, 14)
+		root.setSpacing(8)
+
+		# --- Left Sidebar: list of chats ---
+		self.sidebar = QWidget(self)
+		side_v = QVBoxLayout(self.sidebar)
+		side_v.setContentsMargins(0, 0, 0, 0)
+		side_v.setSpacing(6)
+		top_row = QHBoxLayout()
+		top_row.setContentsMargins(0, 0, 0, 0)
+		top_row.setSpacing(6)
+		self.chats_label = QLabel("Chats")
+		self.chats_label.setStyleSheet("color: #DDE2E7; font-size: 12px;")
+		self.new_chat_btn = QToolButton(self.sidebar)
+		self.new_chat_btn.setText("+ New")
+		self.new_chat_btn.setStyleSheet("QToolButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 6px; padding: 2px 6px; font-size: 11px; }")
+		self.new_chat_btn.clicked.connect(lambda: self._create_new_chat())
+		top_row.addWidget(self.chats_label)
+		top_row.addStretch(1)
+		top_row.addWidget(self.new_chat_btn)
+		side_v.addLayout(top_row)
+		self.chat_list = QListWidget(self.sidebar)
+		self.chat_list.setStyleSheet(
+			"QListWidget { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; color: #E8EAED; font-size: 12px; }"
+		)
+		self.chat_list.itemClicked.connect(self._on_chat_item_clicked)
+		# Keep sidebar compact but usable
+		self.sidebar.setFixedWidth(180)
+		side_v.addWidget(self.chat_list, 1)
+
+		# --- Right Content: existing popup UI in a container ---
+		right_container = QWidget(self)
+		layout = QVBoxLayout(right_container)
+		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(8)
 
 		self.hint_label = QLabel("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
@@ -204,6 +239,10 @@ class PromptPopup(QWidget):
 		self.text_edit.installEventFilter(self)
 		layout.addWidget(self.text_edit)
 
+		# Compose final layout: sidebar on the left, existing content on the right
+		root.addWidget(self.sidebar, 0)
+		root.addWidget(right_container, 1)
+
 		# --- Auto-resize the input: 1-line tall by default, expand with content ---
 		self._input_min_height = 0
 		self._input_max_height = 0
@@ -241,6 +280,15 @@ class PromptPopup(QWidget):
 
 		# No global outside-click filter; closing is handled on deactivate only
 
+		# --- Database state: current chat tracking ---
+		self._current_chat_id = None
+		self._current_chat_name = ''
+		try:
+			ChatDB.initialize()
+			self._load_chats_and_select_latest()
+		except Exception:
+			pass
+
 	def reset(self):
 		"""Clear input and reset UI state so popup opens empty and ready."""
 		self.set_loading(False)
@@ -251,8 +299,12 @@ class PromptPopup(QWidget):
 		self._streaming_bubble = None
 		self._streaming_container = None
 		self._streaming_text = ''
-		# Also clear stored chat history
-		self._history_messages = []
+		# Reload current chat history into UI (keeps selected chat)
+		try:
+			self._reload_current_chat_messages()
+		except Exception:
+			# If anything fails, at least clear in-memory history
+			self._history_messages = []
 
 	def show(self):
 		# Center on screen
@@ -659,6 +711,14 @@ class PromptPopup(QWidget):
 		clean = sanitize_text_for_output(text or "")
 		# Record in history first so callers can snapshot before/after as needed
 		self._history_messages.append({ 'role': 'user', 'content': clean })
+		# Persist to DB if a chat is selected
+		try:
+			if self._current_chat_id is None:
+				self._ensure_chat_exists()
+			ChatDB.add_message(int(self._current_chat_id), 'user', clean)
+			self._refresh_chat_list_preserve_selection()
+		except Exception:
+			pass
 		bubble = self._create_bubble(clean, is_user=True)
 		self._insert_message_widget(bubble)
 		# Allow UI to update before scrolling by adding a small delay
@@ -675,6 +735,14 @@ class PromptPopup(QWidget):
 		self._last_assistant_text = clean
 		# Record in history
 		self._history_messages.append({ 'role': 'assistant', 'content': self._last_assistant_text })
+		# Persist to DB
+		try:
+			if self._current_chat_id is None:
+				self._ensure_chat_exists()
+			ChatDB.add_message(int(self._current_chat_id), 'assistant', clean)
+			self._refresh_chat_list_preserve_selection()
+		except Exception:
+			pass
 		container = self._create_bubble(self._last_assistant_text, is_user=False)
 		self._insert_message_widget(container)
 
@@ -774,6 +842,14 @@ class PromptPopup(QWidget):
 		if text:
 			# Record in history now that the full assistant message is available
 			self._history_messages.append({ 'role': 'assistant', 'content': text })
+			# Persist to DB
+			try:
+				if self._current_chat_id is None:
+					self._ensure_chat_exists()
+				ChatDB.add_message(int(self._current_chat_id), 'assistant', text)
+				self._refresh_chat_list_preserve_selection()
+			except Exception:
+				pass
 		self.set_loading(False)
 		# Clear streaming refs
 		self._streaming_viewer = None
@@ -811,6 +887,126 @@ class PromptPopup(QWidget):
 		in the order they were added during this popup session.
 		"""
 		return list(self._history_messages)
+
+	# ------------------------- Chat persistence helpers ------------------------- #
+
+	def _ensure_chat_exists(self):
+		"""Ensure we have a current chat in the DB; create one if needed.
+
+		Chat name defaults to first user message snippet or 'New Chat'. We keep a
+		simple name for now; could be improved with better heuristics later.
+		"""
+		if self._current_chat_id is not None:
+			return
+		name = self._infer_current_chat_name() or 'New Chat'
+		try:
+			cid = ChatDB.create_chat(name)
+			self._current_chat_id = int(cid)
+			self._current_chat_name = name
+			self._refresh_chat_list_preserve_selection()
+		except Exception:
+			pass
+
+	def _infer_current_chat_name(self) -> str:
+		"""Infer a chat name from the first user message or input text."""
+		for m in self._history_messages:
+			if (m.get('role') or '') == 'user':
+				content = (m.get('content') or '').strip()
+				if content:
+					return (content.splitlines()[0] or '')[:60]
+		text = (self.text_edit.toPlainText() or '').strip()
+		if text:
+			return (text.splitlines()[0] or '')[:60]
+		return ''
+
+	def _refresh_chat_list_preserve_selection(self):
+		"""Reload chat list from DB and keep the selected chat highlighted."""
+		try:
+			chats = ChatDB.list_chats()
+			self.chat_list.clear()
+			selected_row = 0
+			for idx, chat in enumerate(chats):
+				item = QListWidgetItem(str(chat.get('name') or ''))
+				item.setData(Qt.UserRole, int(chat.get('id') or 0))
+				self.chat_list.addItem(item)
+				if self._current_chat_id and int(chat.get('id') or 0) == int(self._current_chat_id):
+					selected_row = idx
+			self.chat_list.setCurrentRow(selected_row)
+		except Exception:
+			pass
+
+	def _load_chats_and_select_latest(self):
+		"""Initial population: load chats and select most recent, or create one."""
+		try:
+			chats = ChatDB.list_chats()
+			self.chat_list.clear()
+			if chats:
+				for chat in chats:
+					item = QListWidgetItem(str(chat.get('name') or ''))
+					item.setData(Qt.UserRole, int(chat.get('id') or 0))
+					self.chat_list.addItem(item)
+				# Select first row (latest by updated_at desc)
+				self.chat_list.setCurrentRow(0)
+				self._set_current_chat_from_item(self.chat_list.item(0))
+			else:
+				# Create a brand-new empty chat
+				name = 'New Chat'
+				cid = ChatDB.create_chat(name)
+				item = QListWidgetItem(name)
+				item.setData(Qt.UserRole, int(cid))
+				self.chat_list.addItem(item)
+				self.chat_list.setCurrentRow(0)
+				self._set_current_chat_from_item(item)
+		except Exception:
+			pass
+
+	def _set_current_chat_from_item(self, item: QListWidgetItem):
+		"""Switch the UI to the selected chat and render its messages."""
+		try:
+			cid = int(item.data(Qt.UserRole))
+			self._current_chat_id = cid
+			self._current_chat_name = item.text() or ''
+			self._reload_current_chat_messages()
+		except Exception:
+			pass
+
+	def _reload_current_chat_messages(self):
+		"""Load messages for current chat from DB into UI and in-memory history."""
+		self.clear_messages()
+		self._history_messages = []
+		if self._current_chat_id is None:
+			return
+		try:
+			msgs = ChatDB.get_messages(int(self._current_chat_id))
+			for m in msgs:
+				role = (m.get('role') or '').strip()
+				content = sanitize_text_for_output(m.get('content') or '')
+				if role == 'user':
+					self._history_messages.append({ 'role': 'user', 'content': content })
+					b = self._create_bubble(content, is_user=True)
+					self._insert_message_widget(b)
+				elif role == 'assistant':
+					self._history_messages.append({ 'role': 'assistant', 'content': content })
+					c = self._create_bubble(content, is_user=False)
+					self._insert_message_widget(c)
+			QTimer.singleShot(50, lambda: None)
+			self._scroll_to_bottom()
+		except Exception:
+			pass
+
+	def _on_chat_item_clicked(self, item: QListWidgetItem):
+		self._set_current_chat_from_item(item)
+
+	def _create_new_chat(self):
+		try:
+			name = 'New Chat'
+			cid = ChatDB.create_chat(name)
+			self._current_chat_id = int(cid)
+			self._current_chat_name = name
+			self._refresh_chat_list_preserve_selection()
+			self._reload_current_chat_messages()
+		except Exception:
+			pass
 
 	def _create_bubble(self, text: str, is_user: bool) -> QWidget:
 		container = QWidget(self.messages_widget)
