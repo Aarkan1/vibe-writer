@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QRect, QEvent, QCoreApplication, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QRect, QEvent, QCoreApplication, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from utils import ConfigManager, sanitize_text_for_output
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontDatabase
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView, QMenu, QInputDialog, QLineEdit, QCheckBox
@@ -82,9 +82,10 @@ class PromptPopup(QWidget):
 		self.setFocusPolicy(Qt.StrongFocus)
 		# Enable passive tracking so we can change the cursor near edges for resizing.
 		self.setMouseTracking(True)
-		# Use logical size with moderate minimum to avoid oversized popup on Windows
-		min_w, min_h = 520, 650
-		w, h = 500, 680
+		# Use a slightly wider logical size and minimum, leaving room for a fixed
+		# left placeholder where the sidebar can open without changing chat width.
+		min_w, min_h = 720, 650
+		w, h = 760, 680
 		self.setMinimumSize(min_w, min_h)
 		# Initial size only; allow user resizing afterward.
 		self.resize(max(w, min_w), max(h, min_h))
@@ -106,7 +107,7 @@ class PromptPopup(QWidget):
 		root.setContentsMargins(14, 14, 14, 14)
 		root.setSpacing(8)
 
-		# --- Left Sidebar: list of chats ---
+		# --- Left Sidebar: list of chats (hosted inside a fixed-width placeholder) ---
 		self.sidebar = QWidget(self)
 		# Sidebar opens outward: keep it visually above chat and not consuming chat stretch
 		# by default. We still place it in the layout but manage window geometry when toggling
@@ -161,8 +162,9 @@ class PromptPopup(QWidget):
 			self.chat_list.customContextMenuRequested.connect(self._on_chat_list_context_menu)
 		except Exception:
 			pass
-		# Keep sidebar at a fixed width when visible to avoid layout jitter.
-		# We still animate open/close by temporarily relaxing the minimum width.
+		# Keep sidebar at a fixed width when visible to avoid layout jitter. We host
+		# it inside a fixed-width placeholder so the overall window width and the chat
+		# area width remain constant while toggling the sidebar.
 		self._sidebar_target_width = 160
 		# Start with a fixed width so it never grows wider during content changes
 		self.sidebar.setMinimumWidth(self._sidebar_target_width)
@@ -351,8 +353,27 @@ class PromptPopup(QWidget):
 			pass
 		layout.addWidget(self.text_edit)
 
-		# Compose final layout: sidebar on the left, existing content on the right
-		root.addWidget(self.sidebar, 0)
+		# Compose final layout: a fixed-width placeholder on the left contains the
+		# actual sidebar widget. This reserves space so the right content width never
+		# changes when toggling the sidebar, preventing shake.
+		self.left_placeholder = QWidget(self)
+		# Ensure the reserved area renders as transparent when the sidebar is hidden
+		try:
+			self.left_placeholder.setStyleSheet("background: transparent;")
+		except Exception:
+			pass
+		# Use horizontal layout so we can anchor the sidebar to the right edge of the
+		# placeholder. As the sidebar width grows, its left edge moves left (open left);
+		# as it shrinks, its left edge moves right (close right).
+		left_placeholder_layout = QHBoxLayout(self.left_placeholder)
+		left_placeholder_layout.setContentsMargins(0, 0, 0, 0)
+		left_placeholder_layout.setSpacing(0)
+		left_placeholder_layout.addStretch(1)
+		left_placeholder_layout.addWidget(self.sidebar)
+		# Reserve constant space for the sidebar regardless of visibility
+		self.left_placeholder.setMinimumWidth(self._sidebar_target_width)
+		self.left_placeholder.setMaximumWidth(self._sidebar_target_width)
+		root.addWidget(self.left_placeholder, 0)
 		root.addWidget(right_container, 1)
 
 		# --- Auto-resize the input: 1-line tall by default, expand with content ---
@@ -411,35 +432,16 @@ class PromptPopup(QWidget):
 			pass
 
 	def _toggle_sidebar(self):
-		"""Animate the chats sidebar open/close without shrinking the chat area.
+		"""Animate the chats sidebar open/close within a fixed left placeholder.
 
-		We expand or contract the window geometry horizontally so the right content
-		(chat area) keeps its width. The sidebar slides in/out to the left.
+		The popup window and chat area widths remain constant. We only slide the
+		sidebar widget's width in/out, while the reserved placeholder prevents any
+		layout shake.
 		"""
 		try:
 			want_show = not self.sidebar.isVisible()
-			# Measure current overall geometry and right-container width
-			geo = self.geometry()
-			current_w = int(geo.width())
-			sidebar_w = int(self._sidebar_target_width)
-			# If showing, increase window width and shift x to the left by sidebar width.
-			# If hiding, decrease width and shift x to the right accordingly.
-			if want_show:
-				new_geo = QRect(geo.x() - sidebar_w, geo.y(), current_w + sidebar_w, geo.height())
-				# Pre-show to allow animation to run
-				if not self.sidebar.isVisible():
-					self.sidebar.setVisible(True)
-					self.sidebar.setMinimumWidth(0)
-					self.sidebar.setMaximumWidth(0)
-				# Animate window geometry first for outward expansion
-				self._animate_window_geometry(geo, new_geo, 200)
-				# Then animate sidebar sliding open
-				self._animate_sidebar(True, duration_ms=200)
-			else:
-				# First slide sidebar closed, then shrink window back in
-				self._animate_sidebar(False, duration_ms=200)
-				new_geo = QRect(geo.x() + sidebar_w, geo.y(), max(0, current_w - sidebar_w), geo.height())
-				self._animate_window_geometry(geo, new_geo, 200)
+			# Keep the window stationary; only animate the sidebar within the fixed placeholder
+			self._animate_sidebar(want_show, duration_ms=200)
 		except Exception:
 			pass
 
@@ -492,8 +494,12 @@ class PromptPopup(QWidget):
 						self.sidebar.setMinimumWidth(self._sidebar_target_width)
 					except Exception:
 						pass
-				# Keep internal state clean
+				# Keep internal state clean and repaint so the transparent area updates
 				self._sidebar_anim = None
+				try:
+					self.update()
+				except Exception:
+					pass
 			try:
 				self._sidebar_anim.finished.connect(_on_finished)
 			except Exception:
@@ -735,12 +741,21 @@ class PromptPopup(QWidget):
 		self.text_edit.setFocus(Qt.ActiveWindowFocusReason)
 
 	def paintEvent(self, _):
-		# Dark rounded background, same as StatusWindow theme
+		# Dark rounded background. When the sidebar is hidden, leave the left reserved
+		# placeholder area fully transparent so it looks like the window shrinks.
 		painter = QPainter(self)
 		painter.setRenderHint(QPainter.Antialiasing)
 		bg = QColor(15, 17, 21, 235)
 		border = QColor(58, 64, 72, 200)
-		rect = self.rect().adjusted(0, 0, -1, -1)
+		full_rect = self.rect().adjusted(0, 0, -1, -1)
+		left_cut = 0
+		try:
+			# If the sidebar is not visible, only paint the right content area
+			if hasattr(self, 'sidebar') and not self.sidebar.isVisible() and hasattr(self, 'left_placeholder'):
+				left_cut = max(0, int(self.left_placeholder.width()))
+		except Exception:
+			left_cut = 0
+		rect = full_rect.adjusted(left_cut, 0, 0, 0)
 		radius = 14
 		painter.setPen(QPen(border, 1))
 		painter.setBrush(QBrush(bg))
@@ -1189,12 +1204,13 @@ class PromptPopup(QWidget):
 		viewer.setReadOnly(True)
 		viewer.setFrameShape(QFrame.NoFrame)
 		viewer.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 		viewer.setFocusPolicy(Qt.NoFocus)
 		viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 		viewer.setMinimumHeight(1)
 		viewer.setStyleSheet(
 			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
+			+ self._scrollbar_qss()
 		)
 		# Normalize font across platforms to keep character/space metrics consistent
 		try:
@@ -1727,7 +1743,7 @@ class PromptPopup(QWidget):
 		viewer.setReadOnly(True)
 		viewer.setFrameShape(QFrame.NoFrame)
 		viewer.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+		viewer.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 		viewer.setFocusPolicy(Qt.NoFocus)
 		# Prevent vertical stretching; we will control height explicitly.
 		viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1735,6 +1751,7 @@ class PromptPopup(QWidget):
 		# Match label/clipboard styling
 		viewer.setStyleSheet(
 			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
+			+ self._scrollbar_qss()
 		)
 		# Normalize font across platforms to keep character/space metrics consistent
 		try:
@@ -1943,6 +1960,13 @@ class PromptPopup(QWidget):
 			doc_h = int(doc.size().height())
 			# Add a small fudge factor to avoid clipping descenders
 			new_h = max(1, doc_h + 2)
+			# If a horizontal scrollbar is needed, include its height to avoid clipping
+			try:
+				hbar = text_browser.horizontalScrollBar()
+				if hbar and (hbar.maximum() > 0 or hbar.isVisible()):
+					new_h += max(0, int(hbar.sizeHint().height()))
+			except Exception:
+				pass
 			if text_browser.height() != new_h:
 				text_browser.setFixedHeight(new_h)
 		except Exception:
@@ -2006,7 +2030,7 @@ class PromptPopup(QWidget):
 			"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
 			"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
 			# Tables
-			"table { border-collapse: collapse; width: 100%; margin: 6px 0; }"
+			"table { border-collapse: collapse; width: auto; margin: 6px 0; }"
 			"th, td { border: none; border-bottom: 1px solid #2E333B; padding: 6px 8px; }"
 			"th { background: rgba(255,255,255,0.06); color: #E8EAED; font-weight: 600; text-align: left; }"
 			"td { color: #D7DBE0; }"
