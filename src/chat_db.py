@@ -119,6 +119,57 @@ class ChatDB:
             conn.close()
 
     @classmethod
+    def search_chats(cls, query: str) -> List[Dict[str, object]]:
+        """Return chats whose title or any message includes the query substring.
+
+        Sorting priority:
+        - Title match first
+        - Then message match
+        - Then most recently updated
+        - Then newest id
+        """
+        q = (query or "").strip()
+        if not q:
+            return cls.list_chats()
+        pattern = f"%{q.lower()}%"
+        conn = cls._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    c.id,
+                    c.name,
+                    c.created_at,
+                    c.updated_at,
+                    CASE WHEN LOWER(c.name) LIKE ? THEN 1 ELSE 0 END AS title_match,
+                    MAX(CASE WHEN LOWER(m.content) LIKE ? THEN 1 ELSE 0 END) AS msg_match
+                FROM chats c
+                LEFT JOIN messages m ON m.chat_id = c.id
+                GROUP BY c.id
+                HAVING (CASE WHEN LOWER(c.name) LIKE ? THEN 1 ELSE 0 END) = 1
+                    OR MAX(CASE WHEN LOWER(m.content) LIKE ? THEN 1 ELSE 0 END) = 1
+                ORDER BY title_match DESC,
+                         msg_match DESC,
+                         datetime(c.updated_at) DESC,
+                         c.id DESC
+                """,
+                (pattern, pattern, pattern, pattern),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    'id': int(r[0]),
+                    'name': str(r[1] or ''),
+                    'created_at': str(r[2] or ''),
+                    'updated_at': str(r[3] or ''),
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    @classmethod
     def delete_chat(cls, chat_id: int) -> None:
         """Delete a chat and all its messages.
 

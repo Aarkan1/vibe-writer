@@ -135,6 +135,22 @@ class PromptPopup(QWidget):
 		top_row.addStretch(1)
 		top_row.addWidget(self.new_chat_btn)
 		side_v.addLayout(top_row)
+		# Search input to filter chats by title and message content
+		self._chat_search_text = ''
+		self.chat_search_input = QLineEdit(self.sidebar)
+		try:
+			self.chat_search_input.setPlaceholderText("Search chats…")
+		except Exception:
+			pass
+		try:
+			self.chat_search_input.setClearButtonEnabled(True)
+		except Exception:
+			pass
+		self.chat_search_input.setStyleSheet(
+			"QLineEdit { background: rgba(255,255,255,0.03); color: #E8EAED; border: 1px solid #2E333B; border-radius: 8px; padding: 6px 8px; font-size: 12px; }"
+		)
+		self.chat_search_input.textChanged.connect(self._on_chat_search_changed)
+		side_v.addWidget(self.chat_search_input)
 		self.chat_list = QListWidget(self.sidebar)
 		# Styling closer to ChatGPT's sidebar
 		self.chat_list.setStyleSheet(
@@ -1416,7 +1432,8 @@ class PromptPopup(QWidget):
 		This preserves the behavior of defaulting to a new chat until a message is sent.
 		"""
 		try:
-			chats = ChatDB.list_chats()
+			q = (self._chat_search_text or '').strip()
+			chats = ChatDB.search_chats(q) if q else ChatDB.list_chats()
 			self.chat_list.clear()
 			selected_row = None
 			for idx, chat in enumerate(chats):
@@ -1455,7 +1472,8 @@ class PromptPopup(QWidget):
 		is actually sent.
 		"""
 		try:
-			chats = ChatDB.list_chats()
+			q = (self._chat_search_text or '').strip()
+			chats = ChatDB.search_chats(q) if q else ChatDB.list_chats()
 			self.chat_list.clear()
 			for chat in chats:
 				name = str(chat.get('name') or '')
@@ -1505,6 +1523,18 @@ class PromptPopup(QWidget):
 			self._current_chat_id = cid
 			self._current_chat_name = item.text() or ''
 			self._reload_current_chat_messages()
+		except Exception:
+			pass
+
+	def _on_chat_search_changed(self, text: str):
+		"""Update chat list based on the current search query.
+
+		We filter chats whose title or any message contains the query (case-insensitive).
+		Sorting prioritizes title matches, then message matches, then recency.
+		"""
+		try:
+			self._chat_search_text = (text or '').strip()
+			self._refresh_chat_list_preserve_selection()
 		except Exception:
 			pass
 
