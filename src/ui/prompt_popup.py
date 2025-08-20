@@ -848,9 +848,15 @@ class PromptPopup(QWidget):
 		return super().eventFilter(obj, event)
 
 	def event(self, event):
-		# Close when the window deactivates (user clicks to another app / window)
+		# Optionally close when the window deactivates (user clicks to another app/window)
+		# Controlled by config: misc.close_popup_on_outside_click
 		if event.type() == QEvent.WindowDeactivate:
-			self.cancelled.emit()
+			try:
+				close_on_deactivate = bool(ConfigManager.get_config_value('misc', 'close_popup_on_outside_click'))
+			except Exception:
+				close_on_deactivate = True
+			if close_on_deactivate:
+				self.cancelled.emit()
 		return super().event(event)
 
 	def resizeEvent(self, event):

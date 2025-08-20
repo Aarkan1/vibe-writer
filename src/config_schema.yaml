@@ -173,6 +173,10 @@ misc:
     value: false
     type: bool
     description: "Set to true to play a noise after the transcription has been typed out."
+  close_popup_on_outside_click:
+    value: false
+    type: bool
+    description: "When true, clicking outside the inline prompt popup closes it. When false, the popup stays open and remains on top."
 
 # OpenRouter settings (used for clipboard-context prompting)
 openrouter:
