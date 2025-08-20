@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
     QTextEdit
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
+from PyQt5.QtGui import QPainter, QBrush, QColor, QPen
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ui.base_window import BaseWindow
@@ -23,6 +24,8 @@ class SettingsWindow(BaseWindow):
         super().__init__('Settings', 700, 700)
         self.schema = ConfigManager.get_schema()
         self.init_settings_ui()
+        # Apply dark theme to match PromptPopup styling
+        self._apply_dark_theme_styles()
 
     def init_settings_ui(self):
         """Initialize the settings user interface."""
@@ -194,6 +197,92 @@ class SettingsWindow(BaseWindow):
     def show_description(self, description):
         """Show a description dialog."""
         QMessageBox.information(self, 'Description', description)
+
+    # ------------------------- Theming & Painting ------------------------- #
+    def paintEvent(self, _):
+        """Draw a dark rounded background with a subtle border, matching popup."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        bg = QColor(15, 17, 21, 235)
+        border = QColor(58, 64, 72, 200)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        radius = 14
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(QBrush(bg))
+        painter.drawRoundedRect(rect, radius, radius)
+
+    def _apply_dark_theme_styles(self):
+        """Apply dark theme QSS consistent with the popup window.
+
+        This includes inputs, tabs, buttons, labels, checkboxes, scrollbars, and combo boxes.
+        It also restyles the BaseWindow title and close button to ensure contrast.
+        """
+        scrollbar_qss = (
+            "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
+            " QScrollBar::handle:vertical { background: rgba(255,255,255,0.16); min-height: 24px; border-radius: 5px; }"
+            " QScrollBar::handle:vertical:hover { background: rgba(255,255,255,0.26); }"
+            " QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+            " QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }"
+            " QScrollBar::handle:horizontal { background: rgba(255,255,255,0.16); min-width: 24px; border-radius: 5px; }"
+            " QScrollBar::handle:horizontal:hover { background: rgba(255,255,255,0.26); }"
+            " QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+            " QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }"
+        )
+
+        self.setStyleSheet(
+            # Base text color
+            "QWidget { color: #E8EAED; background: transparent; }"
+            # Labels
+            " QLabel { color: #DDE2E7; font-size: 12px; }"
+            # Line edits
+            " QLineEdit { background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 6px 8px; }"
+            " QLineEdit:focus { border-color: #4A90E2; }"
+            # Text edits
+            " QTextEdit { background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 6px; }"
+            # Combo boxes
+            " QComboBox { background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 4px 8px; }"
+            " QComboBox:hover { border-color: #4A90E2; }"
+            " QComboBox QAbstractItemView { background: #1E2228; color: #E8EAED; border: 1px solid #3A4048; selection-background-color: rgba(255,255,255,0.10); }"
+            # Buttons
+            " QPushButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 8px; padding: 6px 10px; font-size: 12px; }"
+            " QPushButton:hover { background: rgba(255,255,255,0.10); }"
+            " QPushButton:pressed { background: rgba(255,255,255,0.12); }"
+            # Tool buttons (help icons)
+            " QToolButton { color: #DDE2E7; background: transparent; border: none; }"
+            # Checkboxes
+            " QCheckBox { color: #DDE2E7; font-size: 12px; }"
+            " QCheckBox::indicator { width: 14px; height: 14px; }"
+            " QCheckBox::indicator:unchecked { border: 1px solid #3A4048; background: rgba(255,255,255,0.02); border-radius: 3px; }"
+            " QCheckBox::indicator:checked { border: 1px solid #4A90E2; background: #4A90E2; }"
+            # Tabs
+            " QTabWidget::pane { border: 1px solid #2E333B; border-radius: 8px; top: -1px; }"
+            " QTabBar::tab { background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #2E333B; border-bottom: none; padding: 6px 10px; min-width: 100px; }"
+            " QTabBar::tab:first { border-top-left-radius: 8px; }"
+            " QTabBar::tab:last { border-top-right-radius: 8px; }"
+            " QTabBar::tab:selected { background: rgba(255,255,255,0.10); }"
+            " QTabBar::tab:hover { background: rgba(255,255,255,0.08); }"
+            + scrollbar_qss
+        )
+
+        # Restyle BaseWindow title label and close button for contrast
+        try:
+            for lbl in self.findChildren(QLabel):
+                if (lbl.text() or '').strip() == 'VibeWriter':
+                    lbl.setStyleSheet("color: #DDE2E7; font-size: 12px; font-weight: 600;")
+                    break
+        except Exception:
+            pass
+        try:
+            for btn in self.findChildren(QPushButton):
+                if (btn.text() or '').strip() == '×':
+                    btn.setStyleSheet(
+                        "QPushButton { background-color: transparent; border: none; color: #DDE2E7; }"
+                        " QPushButton:hover { color: #FFFFFF; }"
+                    )
+                    break
+        except Exception:
+            pass
 
     def save_settings(self):
         """Save the settings to the config file and .env file."""
