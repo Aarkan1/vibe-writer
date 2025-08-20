@@ -3,8 +3,8 @@ import sys
 from dotenv import set_key, load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
-    QMessageBox, QTabWidget, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog,
-    QTextEdit
+    QMessageBox, QWidget, QSizePolicy, QSpacerItem, QToolButton, QStyle, QFileDialog,
+    QTextEdit, QListWidget, QStackedWidget
 )
 from PyQt5.QtCore import Qt, QCoreApplication, QProcess, pyqtSignal
 from PyQt5.QtGui import QPainter, QBrush, QColor, QPen
@@ -29,10 +29,33 @@ class SettingsWindow(BaseWindow):
 
     def init_settings_ui(self):
         """Initialize the settings user interface."""
-        self.tabs = QTabWidget()
-        self.main_layout.addWidget(self.tabs)
+        # Replace top tabs with left-side navigation and right-side stacked pages.
+        # Left: a simple list of category names (behaves like links)
+        # Right: stacked pages containing the settings for each category
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName('settings_nav_list')
+        # Keep the nav very narrow and prevent expansion so pages get space
+        self.nav_list.setFixedWidth(150)
+        self.nav_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
-        self.create_tabs()
+        self.pages_stack = QStackedWidget()
+        self.pages_stack.setObjectName('settings_pages_stack')
+        # Ensure pages area expands to take available width
+        self.pages_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.addWidget(self.nav_list)
+        content_row.addWidget(self.pages_stack, stretch=1)
+        content_row.setStretch(0, 0)
+        content_row.setStretch(1, 1)
+
+        self.main_layout.addLayout(content_row)
+
+        self.create_tabs()  # populates nav_list and pages_stack now
+        self.nav_list.currentRowChanged.connect(self.pages_stack.setCurrentIndex)
+        if self.nav_list.count() > 0:
+            self.nav_list.setCurrentRow(0)
         self.create_buttons()
 
         # Connect the use_api checkbox state change
@@ -42,15 +65,23 @@ class SettingsWindow(BaseWindow):
             self.toggle_api_local_options(self.use_api_checkbox.isChecked())
 
     def create_tabs(self):
-        """Create tabs for each category in the schema."""
-        for category, settings in self.schema.items():
-            tab = QWidget()
-            tab_layout = QVBoxLayout()
-            tab.setLayout(tab_layout)
-            self.tabs.addTab(tab, category.replace('_', ' ').capitalize())
+        """Create a page per category and corresponding left-nav link.
 
-            self.create_settings_widgets(tab_layout, category, settings)
-            tab_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        Formerly used a QTabWidget with top tabs. We now create left-side links
+        (QListWidget) and a right-side QStackedWidget to host the category pages.
+        """
+        for category, settings in self.schema.items():
+            # Build page for this category
+            page = QWidget()
+            page_layout = QVBoxLayout()
+            page.setLayout(page_layout)
+
+            self.create_settings_widgets(page_layout, category, settings)
+            page_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+            # Add to stack and create matching nav entry
+            self.pages_stack.addWidget(page)
+            self.nav_list.addItem(category.replace('_', ' ').capitalize())
 
     def create_settings_widgets(self, layout, category, settings):
         """Create widgets for each setting in a category."""
@@ -235,6 +266,25 @@ class SettingsWindow(BaseWindow):
             "QWidget { color: #E8EAED; background: transparent; }"
             # Labels
             " QLabel { color: #DDE2E7; font-size: 12px; }"
+            # Left navigation list
+            " QListWidget#settings_nav_list {"
+            "   background: rgba(255,255,255,0.02);"
+            "   border: 1px solid #2E333B;"
+            "   border-radius: 8px;"
+            "   padding: 6px;"
+            " }"
+            " QListWidget#settings_nav_list::item {"
+            "   padding: 8px 10px;"
+            "   border-radius: 6px;"
+            "   color: #B5B9C0;"
+            " }"
+            " QListWidget#settings_nav_list::item:selected {"
+            "   background: rgba(255,255,255,0.10);"
+            "   color: #E8EAED;"
+            " }"
+            " QListWidget#settings_nav_list::item:hover {"
+            "   background: rgba(255,255,255,0.08);"
+            " }"
             # Line edits
             " QLineEdit { background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 6px 8px; }"
             " QLineEdit:focus { border-color: #4A90E2; }"
@@ -313,7 +363,6 @@ class SettingsWindow(BaseWindow):
             ConfigManager.set_config_value(None, 'openrouter', 'api_key')
 
         ConfigManager.save_config()
-        QMessageBox.information(self, 'Settings Saved', 'Settings have been saved. The application will now restart.')
         self.settings_saved.emit()
         self.close()
 
@@ -415,19 +464,26 @@ class SettingsWindow(BaseWindow):
                             func(widget, category, sub_category, key, meta)
 
     def closeEvent(self, event):
-        """Confirm before closing the settings window without saving."""
-        reply = QMessageBox.question(
-            self,
-            'Close without saving?',
-            'Are you sure you want to close without saving?',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        """Close the settings window without saving and without quitting the app.
 
-        if reply == QMessageBox.Yes:
-            ConfigManager.reload_config()  # Revert to last saved configuration
-            self.update_widgets_from_config()
-            self.settings_closed.emit()
-            super().closeEvent(event)
-        else:
-            event.ignore()
+        We also revert any unsaved changes so that next time the window opens,
+        controls reflect the last saved configuration. No confirmation dialog.
+        """
+        # Revert to last saved configuration (do not write anything)
+        ConfigManager.reload_config()
+        # Update UI controls to match saved values so stale edits are discarded
+        self.update_widgets_from_config()
+        # Notify listeners (e.g., first-run flow may continue with defaults)
+        self.settings_closed.emit()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        """Allow pressing Esc to close the settings window without saving.
+
+        This calls close(), which triggers closeEvent() and discards unsaved edits.
+        """
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
