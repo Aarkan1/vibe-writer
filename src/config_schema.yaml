@@ -190,7 +190,7 @@ openrouter:
       - openai/gpt-oss-20b:free
       - moonshotai/kimi-k2:free
   system_prompt:
-    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary."
+    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary. Answer in markdown format."
     type: text
     description: "System message for OpenRouter."
   user_prompt:
@@ -201,7 +201,7 @@ openrouter:
       INSTRUCTIONS:
       {instructions}
 
-      Please produce the final output now.
+      Please produce the final output in markdown format now.
     type: text
     description: "User message template. Use {context} and {instructions} placeholders."
 
@@ -236,7 +236,7 @@ openai:
       - gpt-4.1-mini
       - gpt-4.1
   system_prompt:
-    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary."
+    value: "You are a precise text-transformation assistant. Follow the instructions exactly, using the provided context. Return only the final result without extra commentary. Answer in markdown format."
     type: text
     description: "System message for OpenAI."
   user_prompt:
@@ -247,6 +247,6 @@ openai:
       INSTRUCTIONS:
       {instructions}
 
-      Please produce the final output now.
+      Please produce the final output in markdown format now.
     type: text
     description: "User message template. Use {context} and {instructions} placeholders."

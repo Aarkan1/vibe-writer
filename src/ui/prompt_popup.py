@@ -1,10 +1,11 @@
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QEvent, QCoreApplication, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QRectF, QRect, QEvent, QCoreApplication, QPoint, QPropertyAnimation, QEasingCurve
 from utils import ConfigManager, sanitize_text_for_output
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView, QMenu, QInputDialog, QLineEdit
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontDatabase
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QApplication, QLabel, QToolButton, QSizePolicy, QFrame, QScrollArea, QHBoxLayout, QTextBrowser, QListWidget, QListWidgetItem, QAbstractItemView, QMenu, QInputDialog, QLineEdit, QCheckBox
 from chat_db import ChatDB
 import threading
 from llm_helper import generate_with_llm
+import re
 
 
 class TypingIndicatorWidget(QWidget):
@@ -69,6 +70,10 @@ class PromptPopup(QWidget):
 
 	def __init__(self, parent=None):
 		super().__init__(parent)
+		# Platform detection for font normalization (Windows vs Linux)
+		import sys as _sys
+		self._is_linux = _sys.platform.startswith('linux')
+		self._is_windows = _sys.platform.startswith('win')
 		self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Dialog)
 		self.setAttribute(Qt.WA_TranslucentBackground, True)
 		# Ensure closing the popup never quits the whole app
@@ -78,8 +83,8 @@ class PromptPopup(QWidget):
 		# Enable passive tracking so we can change the cursor near edges for resizing.
 		self.setMouseTracking(True)
 		# Use logical size with moderate minimum to avoid oversized popup on Windows
-		min_w, min_h = 420, 450
-		w, h = 500, 480
+		min_w, min_h = 520, 650
+		w, h = 500, 680
 		self.setMinimumSize(min_w, min_h)
 		# Initial size only; allow user resizing afterward.
 		self.resize(max(w, min_w), max(h, min_h))
@@ -103,6 +108,9 @@ class PromptPopup(QWidget):
 
 		# --- Left Sidebar: list of chats ---
 		self.sidebar = QWidget(self)
+		# Sidebar opens outward: keep it visually above chat and not consuming chat stretch
+		# by default. We still place it in the layout but manage window geometry when toggling
+		# so the chat area width remains constant. See _animate_sidebar and _toggle_sidebar.
 		side_v = QVBoxLayout(self.sidebar)
 		side_v.setContentsMargins(0, 0, 0, 0)
 		side_v.setSpacing(6)
@@ -200,14 +208,36 @@ class PromptPopup(QWidget):
 		self.clipboard_header.setStyleSheet(
 			"QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 13px; }"
 		)
+		# Toggle to optionally include clipboard as a user message in chat
+		self.clipboard_include_checkbox = QCheckBox("Include", self)
+		try:
+			self.clipboard_include_checkbox.setChecked(True)
+		except Exception:
+			pass
+		try:
+			self.clipboard_include_checkbox.setStyleSheet("QCheckBox { color: #DDE2E7; font-size: 12px; } QCheckBox::indicator { width: 14px; height: 14px; }")
+		except Exception:
+			pass
+		# Header row combines accordion button and the include toggle
+		self.clipboard_header_row = QHBoxLayout()
+		self.clipboard_header_row.setContentsMargins(0, 0, 0, 0)
+		self.clipboard_header_row.setSpacing(6)
+		self.clipboard_header_row.addWidget(self.clipboard_header)
+		self.clipboard_header_row.addStretch(1)
+		self.clipboard_header_row.addWidget(self.clipboard_include_checkbox)
 		# Do not add to layout here; we place it above the input, after messages
 
 		self.clipboard_frame = QFrame(self)
 		self.clipboard_frame.setFrameShape(QFrame.NoFrame)
 		self.clipboard_frame.setStyleSheet("QFrame { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; }")
-		# Make the accordion content a fixed height container; inner editor scrolls
-		self.clipboard_frame.setFixedHeight(140)
+		# Target height for the accordion content (inner editor will scroll)
+		self._clipboard_target_height = 140
+		# Start collapsed: allow animation by controlling maximumHeight
+		self.clipboard_frame.setMinimumHeight(0)
+		self.clipboard_frame.setMaximumHeight(0)
 		self.clipboard_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+		# Animation handle to prevent GC mid-animation
+		self._clipboard_anim = None
 		clipboard_v = QVBoxLayout(self.clipboard_frame)
 		clipboard_v.setContentsMargins(8, 8, 8, 8)
 		clipboard_v.setSpacing(4)
@@ -216,8 +246,7 @@ class PromptPopup(QWidget):
 		self.clipboard_view.setReadOnly(True)
 		self.clipboard_view.setAcceptRichText(False)
 		self.clipboard_view.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; "
-			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; } "
+			"QTextEdit { background: transparent; color: #E8EAED; border: none; padding: 0px; font-size: 13px; } "
 			+ self._scrollbar_qss()
 		)
 		# Let the inner editor expand within the fixed container and scroll as needed
@@ -229,8 +258,8 @@ class PromptPopup(QWidget):
 		# Do not add to layout here; we place it above the input, after messages
 
 		def _toggle_clipboard_section(checked: bool):
-			# Show/hide and rotate arrow (up when open because content sits above)
-			self.clipboard_frame.setVisible(checked)
+			# Animate open/close and rotate arrow (up when open because content sits above)
+			self._animate_clipboard_section(checked, duration_ms=180)
 			try:
 				self.clipboard_header.setArrowType(Qt.UpArrow if checked else Qt.RightArrow)
 			except Exception:
@@ -266,9 +295,9 @@ class PromptPopup(QWidget):
 		loader_row.addStretch(1)
 		loader_row.addWidget(self.loader, 0)
 		layout.addLayout(loader_row)
-		# Place clipboard preview right above the chat input (closed by default): frame above, header below
+		# Place clipboard preview right above the chat input (closed by default): frame above, header row below
 		layout.addWidget(self.clipboard_frame)
-		layout.addWidget(self.clipboard_header)
+		layout.addLayout(self.clipboard_header_row)
 		# Track bubble widgets to update widths on resize
 		self._message_bubbles = []
 
@@ -276,8 +305,7 @@ class PromptPopup(QWidget):
 		self.text_edit = QTextEdit(self)
 		self.text_edit.setPlaceholderText("Write your instructions…")
 		self.text_edit.setStyleSheet(
-			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; "
-			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; } "
+			"QTextEdit { background: transparent; color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px; padding: 8px; font-size: 14px; } "
 			+ self._scrollbar_qss()
 		)
 		self.text_edit.setAcceptRichText(False)
@@ -287,6 +315,40 @@ class PromptPopup(QWidget):
 		self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 		# Intercept Enter/Escape while the editor has focus
 		self.text_edit.installEventFilter(self)
+		# Apply cross-platform font normalization to input and clipboard preview
+		try:
+			self._chat_font_small = self._build_platform_font(point_size=11)
+			self._chat_font_input = self._build_platform_font(point_size=12)
+			self.text_edit.setFont(self._chat_font_input)
+			self.clipboard_view.setFont(self._chat_font_small)
+			# Ensure the QTextDocuments also use the same base font for consistent metrics
+			try:
+				self.text_edit.document().setDefaultFont(self._chat_font_input)
+			except Exception:
+				pass
+			try:
+				self.clipboard_view.document().setDefaultFont(self._chat_font_small)
+			except Exception:
+				pass
+			# Set tab width in clipboard preview to 4 spaces for consistent code alignment
+			try:
+				fm = self.clipboard_view.fontMetrics()
+				try:
+					space_w = int(fm.horizontalAdvance(' '))
+				except Exception:
+					space_w = int(getattr(fm, 'width', lambda s: 8)(' '))
+				# Prefer Qt 5.10+ API; fall back to older API when needed
+				try:
+					self.clipboard_view.setTabStopDistance(float(space_w * 8))
+				except Exception:
+					try:
+						self.clipboard_view.setTabStopWidth(int(space_w * 8))
+					except Exception:
+						pass
+			except Exception:
+				pass
+		except Exception:
+			pass
 		layout.addWidget(self.text_edit)
 
 		# Compose final layout: sidebar on the left, existing content on the right
@@ -312,6 +374,9 @@ class PromptPopup(QWidget):
 		self._streaming_bubble = None
 		self._streaming_container = None
 		self._streaming_text = ''
+
+		# Track whether clipboard has ever been included as a chat message in the current chat
+		self._clipboard_ever_included_in_current_chat = False
 
 		# Build rules to suppress accidental spaces when holding hotkey chords
 		# like Ctrl+Alt+Space for recording. We read the configured hotkeys and
@@ -346,10 +411,35 @@ class PromptPopup(QWidget):
 			pass
 
 	def _toggle_sidebar(self):
-		"""Animate the chats sidebar open/close over 200ms for a smooth slide."""
+		"""Animate the chats sidebar open/close without shrinking the chat area.
+
+		We expand or contract the window geometry horizontally so the right content
+		(chat area) keeps its width. The sidebar slides in/out to the left.
+		"""
 		try:
 			want_show = not self.sidebar.isVisible()
-			self._animate_sidebar(want_show, duration_ms=200)
+			# Measure current overall geometry and right-container width
+			geo = self.geometry()
+			current_w = int(geo.width())
+			sidebar_w = int(self._sidebar_target_width)
+			# If showing, increase window width and shift x to the left by sidebar width.
+			# If hiding, decrease width and shift x to the right accordingly.
+			if want_show:
+				new_geo = QRect(geo.x() - sidebar_w, geo.y(), current_w + sidebar_w, geo.height())
+				# Pre-show to allow animation to run
+				if not self.sidebar.isVisible():
+					self.sidebar.setVisible(True)
+					self.sidebar.setMinimumWidth(0)
+					self.sidebar.setMaximumWidth(0)
+				# Animate window geometry first for outward expansion
+				self._animate_window_geometry(geo, new_geo, 200)
+				# Then animate sidebar sliding open
+				self._animate_sidebar(True, duration_ms=200)
+			else:
+				# First slide sidebar closed, then shrink window back in
+				self._animate_sidebar(False, duration_ms=200)
+				new_geo = QRect(geo.x() + sidebar_w, geo.y(), max(0, current_w - sidebar_w), geo.height())
+				self._animate_window_geometry(geo, new_geo, 200)
 		except Exception:
 			pass
 
@@ -435,6 +525,112 @@ class PromptPopup(QWidget):
 			except Exception:
 				pass
 
+	def _animate_window_geometry(self, start: QRect, end: QRect, duration_ms: int = 200):
+		"""Animate the popup window geometry from start to end.
+
+		We use QPropertyAnimation on the QWidget.geometry property for a smooth
+		shift/resize so the chat area does not get squeezed when the sidebar opens.
+		"""
+		try:
+			anim = QPropertyAnimation(self, b"geometry", self)
+			anim.setDuration(max(0, int(duration_ms)))
+			try:
+				anim.setEasingCurve(QEasingCurve.InOutCubic)
+			except Exception:
+				pass
+			anim.setStartValue(QRect(start))
+			anim.setEndValue(QRect(end))
+			# Keep a ref on self to avoid GC until finished
+			self._window_geo_anim = anim
+			def _clear():
+				self._window_geo_anim = None
+			try:
+				anim.finished.connect(_clear)
+			except Exception:
+				self._window_geo_anim = None
+			anim.start()
+		except Exception:
+			# Fallback immediate apply
+			try:
+				self.setGeometry(end)
+			except Exception:
+				pass
+
+	def _animate_clipboard_section(self, show: bool, duration_ms: int = 180):
+		"""Animate the clipboard preview open/close by changing maximumHeight.
+
+		This keeps the preview in the layout so the chat area is pushed up, not overlapped.
+		During the animation we keep scrolling to bottom so the newest message remains visible.
+		"""
+		try:
+			# Stop any running animation first
+			if self._clipboard_anim is not None:
+				try:
+					self._clipboard_anim.stop()
+				except Exception:
+					pass
+			# Determine start/end heights
+			current_h = max(0, int(self.clipboard_frame.maximumHeight()))
+			start_h = current_h if (current_h > 0 or not show) else 0
+			end_h = int(self._clipboard_target_height) if show else 0
+			# Ensure visible before expanding so animation is visible
+			if show and not self.clipboard_frame.isVisible():
+				self.clipboard_frame.setVisible(True)
+				self.clipboard_frame.setMinimumHeight(0)
+				self.clipboard_frame.setMaximumHeight(0)
+				start_h = 0
+			# Configure animation on maximumHeight
+			anim = QPropertyAnimation(self.clipboard_frame, b"maximumHeight", self)
+			anim.setDuration(max(0, int(duration_ms)))
+			try:
+				anim.setEasingCurve(QEasingCurve.InOutCubic)
+			except Exception:
+				pass
+			anim.setStartValue(int(start_h))
+			anim.setEndValue(int(end_h))
+			# Keep bottom anchored while size changes
+			def _keep_bottom(*_args, **_kwargs):
+				try:
+					self._scroll_to_bottom()
+				except Exception:
+					pass
+			try:
+				anim.valueChanged.connect(lambda *_: _keep_bottom())
+			except Exception:
+				pass
+			def _on_finished():
+				try:
+					if not show:
+						self.clipboard_frame.setVisible(False)
+						self.clipboard_frame.setMaximumHeight(0)
+					else:
+						self.clipboard_frame.setMaximumHeight(int(self._clipboard_target_height))
+					# Final scroll to bottom to stabilize view
+					self._scroll_to_bottom()
+				finally:
+					self._clipboard_anim = None
+			try:
+				anim.finished.connect(_on_finished)
+			except Exception:
+				# Fallback: apply final state immediately
+				if not show:
+					self.clipboard_frame.setVisible(False)
+					self.clipboard_frame.setMaximumHeight(0)
+				else:
+					self.clipboard_frame.setMaximumHeight(int(self._clipboard_target_height))
+				self._clipboard_anim = None
+			# Start and retain reference
+			self._clipboard_anim = anim
+			anim.start()
+		except Exception:
+			# Fallback to immediate toggle
+			self.clipboard_frame.setVisible(show)
+			try:
+				self.clipboard_frame.setMaximumHeight(int(self._clipboard_target_height if show else 0))
+			except Exception:
+				pass
+			self._scroll_to_bottom()
+
 	def _on_chat_list_context_menu(self, pos):
 		"""Open per-item menu with Delete action on right-click."""
 		try:
@@ -494,6 +690,11 @@ class PromptPopup(QWidget):
 		except Exception:
 			# If anything fails, at least clear in-memory history
 			self._history_messages = []
+		# After reloading messages, set clipboard toggle default based on history
+		try:
+			self._update_clipboard_toggle_default()
+		except Exception:
+			pass
 
 	def show(self):
 		# Center on screen
@@ -898,6 +1099,12 @@ class PromptPopup(QWidget):
 		"""Add a right-aligned user message bubble to the chat and scroll to bottom."""
 		# Sanitize to avoid mojibake (e.g., U+202F shown as â¯) before storing/rendering
 		clean = sanitize_text_for_output(text or "")
+		# Track if this user message is a clipboard inclusion (prefix "clipboard:") and remember for defaults
+		try:
+			if (clean or '').lstrip().lower().startswith('clipboard:'):
+				self._clipboard_ever_included_in_current_chat = True
+		except Exception:
+			pass
 		# Record in history first so callers can snapshot before/after as needed
 		self._history_messages.append({ 'role': 'user', 'content': clean })
 		# Persist to DB if a chat is selected
@@ -913,6 +1120,11 @@ class PromptPopup(QWidget):
 		# Allow UI to update before scrolling by adding a small delay
 		QTimer.singleShot(100, lambda: None)
 		self._scroll_to_bottom()
+		# Any history change should turn off clipboard toggle
+		try:
+			self.set_clipboard_toggle_checked(False)
+		except Exception:
+			pass
 
 	def add_assistant_message(self, text: str):
 		"""Add a left-aligned assistant message bubble.
@@ -946,6 +1158,11 @@ class PromptPopup(QWidget):
 					self._maybe_generate_chat_title_async()
 		except Exception:
 			pass
+		# Any history change should turn off clipboard toggle
+		try:
+			self.set_clipboard_toggle_checked(False)
+		except Exception:
+			pass
 
 	def begin_streaming_assistant_message(self):
 		"""Create an empty assistant bubble and prepare to append streamed text."""
@@ -977,36 +1194,36 @@ class PromptPopup(QWidget):
 		viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 		viewer.setMinimumHeight(1)
 		viewer.setStyleSheet(
-			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; "
-			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; }"
+			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
 		)
+		# Normalize font across platforms to keep character/space metrics consistent
 		try:
-			doc = viewer.document()
-			doc.setDocumentMargin(0)
-			doc.setDefaultStyleSheet(
-				"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
-				"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
-			)
+			viewer.setFont(self._chat_font_small)
 		except Exception:
 			pass
 		try:
-			viewer.setMarkdown("")
+			doc = viewer.document()
+			doc.setDocumentMargin(0)
+			doc.setDefaultFont(self._chat_font_small)
+			doc.setDefaultStyleSheet(self._markdown_css())
+		except Exception:
+			pass
+		try:
+			self._set_markdown_with_css(viewer, "")
 		except Exception:
 			viewer.setPlainText("")
 		bubble.setProperty('is_user', False)
 		inner.addWidget(viewer)
-		row.addWidget(bubble, 0)
-		row.addStretch(1)
+		# Assistant bubble should occupy full row width and scale with resizing.
+		bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+		row.addWidget(bubble, 1)
 		# Insert before spacer
 		index = max(0, self.messages_layout.count() - 1)
 		self.messages_layout.insertWidget(index, container)
-		# Width cap like normal assistant bubbles
+		# Let layout drive width; no explicit caps so it stretches to 100% of viewport
 		try:
-			vw = self.messages_scroll.viewport().width()
-			max_w = int(vw * 0.7)
-			# Fix assistant bubble width to a fraction of viewport so it resizes with popup
-			bubble.setMinimumWidth(max_w)
-			bubble.setMaximumWidth(max_w)
+			bubble.setMinimumWidth(0)
+			bubble.setMaximumWidth(16777215)
 		except Exception:
 			pass
 		# Initial height
@@ -1032,7 +1249,7 @@ class PromptPopup(QWidget):
 		if viewer is None:
 			return
 		try:
-			viewer.setMarkdown(self._streaming_text)
+			self._set_markdown_with_css(viewer, self._streaming_text)
 		except Exception:
 			viewer.setPlainText(self._streaming_text)
 		self._adjust_text_browser_height(viewer)
@@ -1066,6 +1283,11 @@ class PromptPopup(QWidget):
 					# Apply a provisional title immediately for instant feedback
 					self._apply_provisional_title()
 					self._maybe_generate_chat_title_async()
+		except Exception:
+			pass
+		# Any history change should turn off clipboard toggle
+		try:
+			self.set_clipboard_toggle_checked(False)
 		except Exception:
 			pass
 
@@ -1238,6 +1460,9 @@ class PromptPopup(QWidget):
 				self.chat_list.clearSelection()
 			except Exception:
 				pass
+			# New ephemeral session: reset clipboard include history and toggle default
+			self._clipboard_ever_included_in_current_chat = False
+			self.set_clipboard_toggle_checked(True)
 		except Exception:
 			pass
 
@@ -1273,6 +1498,8 @@ class PromptPopup(QWidget):
 			# After a short delay (let layouts and heights settle), smoothly scroll to bottom
 			# so the latest message is fully visible even for long chats.
 			QTimer.singleShot(200, lambda: self._smooth_scroll_to_bottom(200))
+			# Update clipboard include toggle default based on whether chat previously included clipboard
+			self._update_clipboard_toggle_default()
 		except Exception:
 			pass
 
@@ -1342,6 +1569,22 @@ class PromptPopup(QWidget):
 			def _worker():
 				try:
 					name = generate_with_llm('', prompt, history_messages=[]).strip()
+					# Extract a clean title if the model returns Markdown like "Title: Something"
+					# We intentionally keep this logic minimal and robust. If no pattern matches,
+					# fall back to the raw first line.
+					try:
+						m = re.search(r'^\s*title\s*:\s*(.+?)\s*$', name, re.I | re.M)
+						if not m:
+							# Also check inside fenced blocks if returned
+							f = re.search(r'```[a-zA-Z0-9]*\s*([\s\S]*?)```', name, re.I)
+							if f:
+								inner = f.group(1) or ''
+								m = re.search(r'^\s*title\s*:\s*(.+?)\s*$', inner, re.I | re.M)
+						clean_title = (m.group(1) if m else name.splitlines()[0] if name else '').strip()
+						name = clean_title
+					except Exception:
+						# On any parsing error, proceed with the original string
+						pass
 					# Sanitize and clamp
 					name = sanitize_text_for_output(name).replace('\n', ' ').strip().strip('"').strip("'")
 					if not name:
@@ -1381,6 +1624,38 @@ class PromptPopup(QWidget):
 			QTimer.singleShot(50, lambda: self._refresh_chat_list_preserve_selection())
 		except Exception:
 			self._suppress_item_changed = False
+			pass
+
+	def _update_clipboard_toggle_default(self):
+		"""Update the Include checkbox default per current chat history.
+
+		Default to checked unless a prior user message starts with 'clipboard:'.
+		"""
+		included_before = False
+		try:
+			for m in self._history_messages:
+				role = (m.get('role') or '').strip().lower()
+				content = (m.get('content') or '').strip().lower()
+				if role == 'user' and content.startswith('clipboard:'):
+					included_before = True
+					break
+		except Exception:
+			included_before = False
+		self._clipboard_ever_included_in_current_chat = included_before
+		self.set_clipboard_toggle_checked(False if included_before else True)
+
+	def is_clipboard_toggle_checked(self) -> bool:
+		"""Return whether the 'Include' checkbox is currently checked."""
+		try:
+			return bool(self.clipboard_include_checkbox.isChecked())
+		except Exception:
+			return False
+
+	def set_clipboard_toggle_checked(self, checked: bool):
+		"""Set the 'Include' checkbox state safely."""
+		try:
+			self.clipboard_include_checkbox.setChecked(bool(checked))
+		except Exception:
 			pass
 
 	def _apply_provisional_title(self):
@@ -1459,24 +1734,26 @@ class PromptPopup(QWidget):
 		viewer.setMinimumHeight(1)
 		# Match label/clipboard styling
 		viewer.setStyleSheet(
-			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; "
-			"font-family: 'Segoe UI', 'Segoe UI Emoji', 'Noto Color Emoji', 'Arial Unicode MS', 'Noto Sans Symbols', 'Noto Sans', 'DejaVu Sans', sans-serif; }"
+			"QTextBrowser { color: #E8EAED; font-size: 13px; border: none; background: transparent; }"
 		)
+		# Normalize font across platforms to keep character/space metrics consistent
+		try:
+			viewer.setFont(self._chat_font_small)
+		except Exception:
+			pass
 		# Reduce default document and block margins so bubbles hug content.
 		try:
 			doc = viewer.document()
 			doc.setDocumentMargin(0)
-			doc.setDefaultStyleSheet(
-				"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
-				"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
-			)
+			doc.setDefaultFont(self._chat_font_small)
+			doc.setDefaultStyleSheet(self._markdown_css())
 		except Exception:
 			pass
-		# Prefer native Qt Markdown rendering (Qt 5.14+). Fallback to plain text.
 		try:
-			viewer.setMarkdown(sanitize_text_for_output(text or ""))
+			self._set_markdown_with_css(viewer, sanitize_text_for_output(text or ""))
 		except Exception:
 			viewer.setPlainText(sanitize_text_for_output(text or ""))
+
 		# Mark bubble type for later width updates
 		bubble.setProperty('is_user', is_user)
 		# Initial sizing before layout paint to avoid oversized first render
@@ -1486,21 +1763,22 @@ class PromptPopup(QWidget):
 			h.addStretch(1)
 			h.addWidget(bubble, 0)
 		else:
-			h.addWidget(bubble, 0)
-			h.addStretch(1)
+			# Assistant bubble should fill the row width and scale with resize.
+			bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+			h.addWidget(bubble, 1)
 		# Set bubble width constraints
 		try:
 			vw = self.messages_scroll.viewport().width()
-			max_w = int(vw * 0.7)
+			max_w = max(1, int(vw) - 4)
 			if is_user:
 				# Fit user bubble to content width (with padding), capped at 70% viewport
 				target = self._compute_bubble_target_width(viewer, max_w)
 				bubble.setMinimumWidth(target)
 				bubble.setMaximumWidth(target)
 			else:
-				# Assistant bubble: fix width to a fraction of viewport so it tracks window size
-				bubble.setMinimumWidth(max_w)
-				bubble.setMaximumWidth(max_w)
+				# Remove explicit width caps; let layout make it 100% width.
+				bubble.setMinimumWidth(0)
+				bubble.setMaximumWidth(16777215)
 		except Exception:
 			pass
 		# Recalculate after width constraint for an accurate height
@@ -1516,6 +1794,42 @@ class PromptPopup(QWidget):
 		# Track for future resize adjustments
 		self._message_bubbles.append(bubble)
 		return container
+
+	def _build_platform_font(self, point_size: int) -> QFont:
+		"""Return a QFont tuned to provide consistent spacing across platforms.
+
+		On Windows we prefer 'Segoe UI'. On Linux we prefer 'Noto Sans' or 'Ubuntu',
+		and we slightly tighten letter spacing to better match Segoe's metrics.
+		"""
+		try:
+			db = QFontDatabase()
+		except Exception:
+			db = None
+		# Determine preferred family per platform
+		family_candidates = []
+		if self._is_windows:
+			family_candidates = ['Segoe UI', 'Arial Unicode MS']
+		elif self._is_linux:
+			family_candidates = ['Noto Sans', 'Ubuntu', 'DejaVu Sans']
+		else:
+			family_candidates = ['Noto Sans', 'Segoe UI', 'DejaVu Sans']
+		chosen_family = ''
+		for fam in family_candidates:
+			try:
+				if (db is None) or (fam in (db.families() if db else [])):
+					chosen_family = fam
+					break
+			except Exception:
+				# Fallback to first candidate on any error
+				chosen_family = fam
+				break
+		font = QFont(chosen_family if chosen_family else 'Sans Serif', point_size)
+		# Prefer sans-serif metrics and native fallback behavior
+		try:
+			font.setStyleHint(QFont.SansSerif, QFont.PreferDefault)
+		except Exception:
+			pass
+		return font
 
 	def _scroll_to_bottom(self):
 		"""Instantly scroll to the very bottom of the messages area."""
@@ -1590,10 +1904,10 @@ class PromptPopup(QWidget):
 		QTimer.singleShot(0, _align)
 
 	def _update_bubble_widths(self):
-		"""Update existing message bubbles to keep width at 70% of chat viewport."""
+		"""Update existing message bubbles to keep widths in sync with viewport."""
 		try:
 			vw = self.messages_scroll.viewport().width()
-			max_w = int(vw * 0.7)
+			max_w = max(1, int(vw) - 4)
 			for bubble in list(self._message_bubbles):
 				if bubble is None or bubble.parent() is None:
 					continue
@@ -1609,9 +1923,9 @@ class PromptPopup(QWidget):
 					bubble.setMaximumWidth(target)
 					self._adjust_text_browser_height(viewer)
 				else:
-					# Assistant bubble tracks popup width: fix to fraction of viewport
-					bubble.setMinimumWidth(max_w)
-					bubble.setMaximumWidth(max_w)
+					# Assistant bubble fills available width; avoid explicit caps so it stretches
+					bubble.setMinimumWidth(0)
+					bubble.setMaximumWidth(16777215)
 					if viewer is not None:
 						self._adjust_text_browser_height(viewer)
 		except Exception:
@@ -1679,4 +1993,72 @@ class PromptPopup(QWidget):
 			"QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }"
 		)
 
+	def _markdown_css(self) -> str:
+		"""Return CSS applied to rendered HTML to style markdown and code blocks.
 
+		We keep styles dark-themed and ensure fenced code blocks are readable. When
+		Pygments is available (via python-markdown's codehilite extension with
+		`noclasses=True`), token colors are inlined; we still provide background,
+		padding, and fonts for code containers.
+		"""
+		return (
+			# Spacing for block elements
+			"p, ul, ol, pre, h1, h2, h3, h4, h5, h6 { margin-top: 0px; margin-bottom: 6px; }"
+			"p:last-child, ul:last-child, ol:last-child, pre:last-child, h1:last-child, h2:last-child, h3:last-child, h4:last-child, h5:last-child, h6:last-child { margin-bottom: 0px; }"
+			# Tables
+			"table { border-collapse: collapse; width: 100%; margin: 6px 0; }"
+			"th, td { border: none; border-bottom: 1px solid #2E333B; padding: 6px 8px; }"
+			"th { background: rgba(255,255,255,0.06); color: #E8EAED; font-weight: 600; text-align: left; }"
+			"td { color: #D7DBE0; }"
+			# Inline code
+			"code { font-family: 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;"
+			" background: rgba(255,255,255,0.06); color: #E8EAED; padding: 1px 4px; border-radius: 4px; }"
+			# Do not add inline code background inside fenced blocks
+			"pre code { background: transparent; padding: 0; border-radius: 0; }"
+			# Pre/code blocks
+			"pre { font-family: 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;"
+			" background: rgba(255,255,255,0.04); color: #E8EAED; border: 1px solid #3A4048; border-radius: 8px;"
+			" padding: 8px; overflow-x: auto; }"
+			# CodeHilite wrapper (Markdown extension)
+			".codehilite { background: rgba(255,255,255,0.04); border: 1px solid #3A4048; border-radius: 8px; padding: 8px; }"
+			".codehilite pre { margin: 0; background: transparent; }"
+			".codehilite code { background: transparent; }"
+		)
+
+	def _set_markdown_with_css(self, viewer: QTextBrowser, text: str):
+		"""
+		Render markdown with syntax highlighting when possible; otherwise fall back
+		to Qt's Markdown rendering. We always end with HTML so the document
+		`defaultStyleSheet` applies.
+		"""
+		# Try python-markdown with codehilite (Pygments) first for syntax highlighting
+		try:
+			import markdown as _md  # type: ignore
+			# Enable fenced code blocks and inline Pygments styles (noclasses=True)
+			html = _md.markdown(
+				text or "",
+				extensions=[
+					"fenced_code",
+					"tables",
+					"codehilite",
+				],
+				extension_configs={
+					"codehilite": {
+						"linenums": False,
+						"guess_lang": False,
+						"noclasses": True,
+						"pygments_style": "monokai",
+					}
+				},
+			)
+			viewer.setHtml(html)
+			return
+		except Exception:
+			pass
+		# Fallback: use Qt's Markdown pipeline and reparse as HTML so CSS applies
+		try:
+			viewer.setMarkdown(text or "")
+			html = viewer.toHtml()
+			viewer.setHtml(html)
+		except Exception:
+			viewer.setPlainText(text or "")

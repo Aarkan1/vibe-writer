@@ -444,13 +444,13 @@ class VibeWriterApp(QObject):
             except Exception:
                 pass
             return
-        # Read context from clipboard after earlier copy
-        context_text = (_pc.paste() or '').strip()
-        if not context_text and hasattr(self, 'app'):
+        # Read clipboard (optionally included as a chat message based on UI toggle)
+        clipboard_text = (_pc.paste() or '').strip()
+        if not clipboard_text and hasattr(self, 'app'):
             try:
-                context_text = (self.app.clipboard().text() or '').strip()
+                clipboard_text = (self.app.clipboard().text() or '').strip()
             except Exception:
-                context_text = ''
+                clipboard_text = ''
         # If a previous request is active, cancel it and abort any streaming UI bubble
         try:
             if self.current_inline_cancel_event is not None:
@@ -459,9 +459,15 @@ class VibeWriterApp(QObject):
                 self.prompt_popup.abort_streaming_assistant_message()
         except Exception:
             pass
-        # Add user's message bubble, clear input, keep focus, and show loader while we compute
+        # Optionally add clipboard as a user message, then add user's instructions; clear input, keep focus, and show loader
         if self.prompt_popup:
             try:
+                # Include clipboard as first user message when toggle is checked
+                try:
+                    if self.prompt_popup.is_clipboard_toggle_checked() and clipboard_text:
+                        self.prompt_popup.add_user_message(f"clipboard: {clipboard_text}")
+                except Exception:
+                    pass
                 self.prompt_popup.add_user_message(instructions_text)
             except Exception:
                 pass
@@ -488,11 +494,12 @@ class VibeWriterApp(QObject):
                         self.inlineStreamDelta.emit(s)
                 except Exception:
                     pass
-            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
+            # Context is now provided via history (clipboard message) when included
+            final_output = stream_with_llm('', instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
             if my_event.is_set():
                 return
             if not final_output and not my_event.is_set():
-                final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
+                final_output = generate_with_llm('', instructions_text, history_messages=history) or ''
             if not my_event.is_set():
                 self.inlinePromptReady.emit(final_output)
             # Clear active event if still current
@@ -513,8 +520,19 @@ class VibeWriterApp(QObject):
     def _handle_inline_preview_on_ui(self, instructions_text: str):
         import pyperclip as _pc
         import threading as _threading
-        # Add user's message bubble, clear input, keep focus, then read context
+        # Optionally add clipboard as user message, then user's instructions; clear input, keep focus
         if self.prompt_popup:
+            try:
+                clipboard_text = (_pc.paste() or '').strip()
+                if not clipboard_text and hasattr(self, 'app'):
+                    try:
+                        clipboard_text = (self.app.clipboard().text() or '').strip()
+                    except Exception:
+                        clipboard_text = ''
+                if self.prompt_popup.is_clipboard_toggle_checked() and clipboard_text:
+                    self.prompt_popup.add_user_message(f"clipboard: {clipboard_text}")
+            except Exception:
+                pass
             try:
                 self.prompt_popup.add_user_message(instructions_text)
             except Exception:
@@ -524,12 +542,6 @@ class VibeWriterApp(QObject):
                 self.prompt_popup.text_edit.setFocus(Qt.ActiveWindowFocusReason)
             except Exception:
                 pass
-        context_text = (_pc.paste() or '').strip()
-        if not context_text and hasattr(self, 'app'):
-            try:
-                context_text = (self.app.clipboard().text() or '').strip()
-            except Exception:
-                context_text = ''
         # If a previous request is active, cancel it and abort any streaming UI bubble
         try:
             if self.current_inline_cancel_event is not None:
@@ -557,11 +569,12 @@ class VibeWriterApp(QObject):
                         self.inlineStreamDelta.emit(s)
                 except Exception:
                     pass
-            final_output = stream_with_llm(context_text, instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
+            # Context now comes from history (clipboard message) when included
+            final_output = stream_with_llm('', instructions_text, history_messages=history, on_delta=_on_delta, cancel_event=my_event) or ''
             if my_event.is_set():
                 return
             if not final_output and not my_event.is_set():
-                final_output = generate_with_llm(context_text, instructions_text, history_messages=history) or ''
+                final_output = generate_with_llm('', instructions_text, history_messages=history) or ''
             if not my_event.is_set():
                 self.inlinePreviewReady.emit(final_output)
             try:
