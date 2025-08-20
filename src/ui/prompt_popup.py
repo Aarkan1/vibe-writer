@@ -1128,17 +1128,18 @@ class PromptPopup(QWidget):
 				self._clipboard_ever_included_in_current_chat = True
 		except Exception:
 			pass
-		# Record in history first so callers can snapshot before/after as needed
-		self._history_messages.append({ 'role': 'user', 'content': clean })
-		# Persist to DB if a chat is selected
+		# Persist to DB if a chat is selected and capture message id
+		msg_id = None
 		try:
 			if self._current_chat_id is None:
 				self._ensure_chat_exists()
-			ChatDB.add_message(int(self._current_chat_id), 'user', clean)
+			msg_id = ChatDB.add_message(int(self._current_chat_id), 'user', clean)
 			self._refresh_chat_list_preserve_selection()
 		except Exception:
 			pass
-		bubble = self._create_bubble(clean, is_user=True)
+		# Record in history after persisting to include id when available
+		self._history_messages.append({ 'id': int(msg_id or 0), 'role': 'user', 'content': clean })
+		bubble = self._create_bubble(clean, is_user=True, message_id=msg_id)
 		self._insert_message_widget(bubble)
 		# Allow UI to update before scrolling by adding a small delay
 		QTimer.singleShot(100, lambda: None)
@@ -1157,17 +1158,18 @@ class PromptPopup(QWidget):
 		"""
 		clean = sanitize_text_for_output(text or "")
 		self._last_assistant_text = clean
-		# Record in history
-		self._history_messages.append({ 'role': 'assistant', 'content': self._last_assistant_text })
-		# Persist to DB
+		# Persist to DB and record id
+		msg_id = None
 		try:
 			if self._current_chat_id is None:
 				self._ensure_chat_exists()
-			ChatDB.add_message(int(self._current_chat_id), 'assistant', clean)
+			msg_id = ChatDB.add_message(int(self._current_chat_id), 'assistant', clean)
 			self._refresh_chat_list_preserve_selection()
 		except Exception:
 			pass
-		container = self._create_bubble(self._last_assistant_text, is_user=False)
+		# Record in history including id
+		self._history_messages.append({ 'id': int(msg_id or 0), 'role': 'assistant', 'content': self._last_assistant_text })
+		container = self._create_bubble(self._last_assistant_text, is_user=False, message_id=msg_id)
 		self._insert_message_widget(container)
 		# Trigger auto-name generation once per chat after the first assistant reply
 		# Guard: only when the chat has at most two messages (first user + first assistant)
@@ -1281,15 +1283,21 @@ class PromptPopup(QWidget):
 	def finish_streaming_assistant_message(self):
 		"""Finalize the streaming message: commit to history and stop loader."""
 		text = self._streaming_text or ''
+		msg_id = None
 		if text:
-			# Record in history now that the full assistant message is available
-			self._history_messages.append({ 'role': 'assistant', 'content': text })
-			# Persist to DB
+			# Persist to DB, then record in history with id
 			try:
 				if self._current_chat_id is None:
 					self._ensure_chat_exists()
-				ChatDB.add_message(int(self._current_chat_id), 'assistant', text)
+				msg_id = ChatDB.add_message(int(self._current_chat_id), 'assistant', text)
 				self._refresh_chat_list_preserve_selection()
+			except Exception:
+				pass
+			self._history_messages.append({ 'id': int(msg_id or 0), 'role': 'assistant', 'content': text })
+			# Add action buttons now that we have the id
+			try:
+				if self._streaming_bubble is not None and self._streaming_container is not None:
+					self._add_assistant_actions_row(self._streaming_bubble, text, msg_id, self._streaming_container)
 			except Exception:
 				pass
 		self.set_loading(False)
@@ -1511,13 +1519,14 @@ class PromptPopup(QWidget):
 			for m in msgs:
 				role = (m.get('role') or '').strip()
 				content = sanitize_text_for_output(m.get('content') or '')
+				mid = int(m.get('id') or 0)
 				if role == 'user':
-					self._history_messages.append({ 'role': 'user', 'content': content })
-					b = self._create_bubble(content, is_user=True)
+					self._history_messages.append({ 'id': mid, 'role': 'user', 'content': content })
+					b = self._create_bubble(content, is_user=True, message_id=mid)
 					self._insert_message_widget(b)
 				elif role == 'assistant':
-					self._history_messages.append({ 'role': 'assistant', 'content': content })
-					c = self._create_bubble(content, is_user=False)
+					self._history_messages.append({ 'id': mid, 'role': 'assistant', 'content': content })
+					c = self._create_bubble(content, is_user=False, message_id=mid)
 					self._insert_message_widget(c)
 			# After a short delay (let layouts and heights settle), smoothly scroll to bottom
 			# so the latest message is fully visible even for long chats.
@@ -1723,7 +1732,7 @@ class PromptPopup(QWidget):
 		except Exception:
 			pass
 
-	def _create_bubble(self, text: str, is_user: bool) -> QWidget:
+	def _create_bubble(self, text: str, is_user: bool, message_id: int = None) -> QWidget:
 		container = QWidget(self.messages_widget)
 		h = QHBoxLayout(container)
 		h.setContentsMargins(0, 0, 0, 0)
@@ -1784,6 +1793,25 @@ class PromptPopup(QWidget):
 		# Initial sizing before layout paint to avoid oversized first render
 		self._adjust_text_browser_height(viewer)
 		inner.addWidget(viewer)
+		# For assistant messages, add a compact actions row (copy, delete)
+		if not is_user:
+			actions = QHBoxLayout()
+			actions.setContentsMargins(0, 2, 0, 0)
+			actions.setSpacing(4)
+			btn_copy = QToolButton(bubble)
+			btn_copy.setText("⧉")
+			btn_copy.setToolTip("Copy message")
+			btn_copy.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_copy.clicked.connect(lambda _=None, t=text: self._copy_text_to_clipboard(t))
+			btn_delete = QToolButton(bubble)
+			btn_delete.setText("🗑")
+			btn_delete.setToolTip("Delete message")
+			btn_delete.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_delete.clicked.connect(lambda _=None, cid=int(self._current_chat_id) if self._current_chat_id is not None else 0, mid=int(message_id or 0), cont=container: self._delete_message_and_update_ui(cid, mid, cont, text))
+			actions.addWidget(btn_copy)
+			actions.addWidget(btn_delete)
+			actions.addStretch(1)
+			inner.addLayout(actions)
 		if is_user:
 			h.addStretch(1)
 			h.addWidget(bubble, 0)
@@ -1819,6 +1847,90 @@ class PromptPopup(QWidget):
 		# Track for future resize adjustments
 		self._message_bubbles.append(bubble)
 		return container
+
+	def _add_assistant_actions_row(self, bubble: QFrame, text: str, message_id: int, container: QWidget):
+		"""Attach copy/delete buttons to an existing assistant bubble (used after streaming)."""
+		try:
+			inner = bubble.layout()
+			if inner is None:
+				return
+			actions = QHBoxLayout()
+			actions.setContentsMargins(0, 2, 0, 0)
+			actions.setSpacing(4)
+			btn_copy = QToolButton(bubble)
+			btn_copy.setText("⧉")
+			btn_copy.setToolTip("Copy message")
+			btn_copy.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_copy.clicked.connect(lambda _=None, t=text: self._copy_text_to_clipboard(t))
+			btn_delete = QToolButton(bubble)
+			btn_delete.setText("🗑")
+			btn_delete.setToolTip("Delete message")
+			btn_delete.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_delete.clicked.connect(lambda _=None, cid=int(self._current_chat_id) if self._current_chat_id is not None else 0, mid=int(message_id or 0), cont=container: self._delete_message_and_update_ui(cid, mid, cont, text))
+			actions.addWidget(btn_copy)
+			actions.addWidget(btn_delete)
+			actions.addStretch(1)
+			inner.addLayout(actions)
+		except Exception:
+			pass
+
+	def _copy_text_to_clipboard(self, text: str):
+		"""Copy given text to the system clipboard."""
+		try:
+			QApplication.clipboard().setText(text or "")
+		except Exception:
+			pass
+
+	def _delete_message_and_update_ui(self, chat_id: int, message_id: int, container: QWidget, text: str):
+		"""Delete a message from DB (if persisted) and remove its UI widget and history entry."""
+		# Remove from DB when we have valid identifiers
+		try:
+			if chat_id and message_id:
+				ChatDB.delete_message(int(chat_id), int(message_id))
+				self._refresh_chat_list_preserve_selection()
+		except Exception:
+			pass
+		# Remove from UI
+		try:
+			self.messages_layout.removeWidget(container)
+			# Schedule proper deletion to also clean up child widgets
+			try:
+				container.deleteLater()
+			except Exception:
+				container.setParent(None)
+		except Exception:
+			pass
+		# Remove from in-memory history
+		try:
+			new_hist = []
+			removed_idx = None
+			for idx, m in enumerate(self._history_messages):
+				mid = int(m.get('id') or 0)
+				if mid and message_id and mid == message_id:
+					removed_idx = idx
+					continue
+				new_hist.append(m)
+			# Fallback: if no id match, drop first assistant entry with same text
+			if removed_idx is None:
+				for idx, m in enumerate(self._history_messages):
+					if (m.get('role') == 'assistant') and (m.get('content') == (text or '')):
+						removed_idx = idx
+						break
+				if removed_idx is not None:
+					new_hist = self._history_messages[:removed_idx] + self._history_messages[removed_idx+1:]
+			self._history_messages = new_hist
+		except Exception:
+			pass
+		# Update last assistant text for Ctrl+Enter paste
+		try:
+			last = ""
+			for m in reversed(self._history_messages):
+				if (m.get('role') or '') == 'assistant':
+					last = m.get('content') or ''
+					break
+			self._last_assistant_text = last
+		except Exception:
+			pass
 
 	def _build_platform_font(self, point_size: int) -> QFont:
 		"""Return a QFont tuned to provide consistent spacing across platforms.

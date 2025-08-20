@@ -157,14 +157,27 @@ class ChatDB:
         try:
             cur = conn.cursor()
             cur.execute(
-                "SELECT role, content FROM messages WHERE chat_id=? ORDER BY id ASC",
+                "SELECT id, role, content FROM messages WHERE chat_id=? ORDER BY id ASC",
                 (chat_id,),
             )
             rows = cur.fetchall()
             return [
-                { 'role': str(r[0] or ''), 'content': str(r[1] or '') }
+                { 'id': int(r[0] or 0), 'role': str(r[1] or ''), 'content': str(r[2] or '') }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+    @classmethod
+    def delete_message(cls, chat_id: int, message_id: int) -> None:
+        """Delete a single message from a chat and update the chat timestamp."""
+        conn = cls._connect()
+        try:
+            now = _now_iso()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM messages WHERE id=? AND chat_id=?", (message_id, chat_id))
+            cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+            conn.commit()
         finally:
             conn.close()
 
