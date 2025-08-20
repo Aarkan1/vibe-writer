@@ -1052,12 +1052,20 @@ class PromptPopup(QWidget):
 		if is_loading:
 			self.loader.show()
 			self.loader.start()
-			self.text_edit.setDisabled(True)
+			# Keep input enabled and focused so the user can continue typing the next message
+			try:
+				self.text_edit.setFocus(Qt.ActiveWindowFocusReason)
+			except Exception:
+				pass
 			self.hint_label.setText("Running… (Esc to cancel)")
 		else:
 			self.loader.stop()
 			self.loader.hide()
-			self.text_edit.setDisabled(False)
+			# Preserve focus on the input when loading finishes
+			try:
+				self.text_edit.setFocus(Qt.ActiveWindowFocusReason)
+			except Exception:
+				pass
 			self.hint_label.setText("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
 
 	# ------------------------- Input auto-resize helpers ------------------------- #
