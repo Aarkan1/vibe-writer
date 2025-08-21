@@ -177,6 +177,10 @@ misc:
     value: false
     type: bool
     description: "When true, clicking outside the inline prompt popup closes it. When false, the popup stays open and remains on top."
+  include_clipboard_by_default:
+    value: true
+    type: bool
+    description: "Default state of the 'Include' clipboard checkbox in the prompt popup."
 
 # OpenRouter settings (used for clipboard-context prompting)
 openrouter:

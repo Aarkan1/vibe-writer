@@ -207,9 +207,16 @@ class PromptPopup(QWidget):
 		self.header_toggle_btn.setToolTip("Show/Hide chats")
 		self.header_toggle_btn.setStyleSheet("QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 14px; padding: 0 4px; }")
 		self.header_toggle_btn.clicked.connect(lambda: self._toggle_sidebar())
+		# Close button at upper-right corner
+		self.close_btn = QToolButton(right_container)
+		self.close_btn.setText("✕")
+		self.close_btn.setToolTip("Close")
+		self.close_btn.setStyleSheet("QToolButton { color: #DDE2E7; background: transparent; border: none; font-size: 14px; padding: 0 4px; }")
+		self.close_btn.clicked.connect(lambda: self.cancelled.emit())
 		header_row.addWidget(self.header_toggle_btn)
 		header_row.addWidget(self.hint_label)
 		header_row.addStretch(1)
+		header_row.addWidget(self.close_btn)
 		layout.addLayout(header_row)
 
 		# --- Accordion: Clipboard context preview (read-only) ---
@@ -229,9 +236,13 @@ class PromptPopup(QWidget):
 		# Toggle to optionally include clipboard as a user message in chat
 		self.clipboard_include_checkbox = QCheckBox("Include", self)
 		try:
-			self.clipboard_include_checkbox.setChecked(True)
+			val = ConfigManager.get_config_value('misc', 'include_clipboard_by_default')
+			self.clipboard_include_checkbox.setChecked(True if val is None else bool(val))
 		except Exception:
-			pass
+			try:
+				self.clipboard_include_checkbox.setChecked(True)
+			except Exception:
+				pass
 		try:
 			self.clipboard_include_checkbox.setStyleSheet("QCheckBox { color: #DDE2E7; font-size: 12px; } QCheckBox::indicator { width: 14px; height: 14px; }")
 		except Exception:
@@ -1518,7 +1529,11 @@ class PromptPopup(QWidget):
 				pass
 			# New ephemeral session: reset clipboard include history and toggle default
 			self._clipboard_ever_included_in_current_chat = False
-			self.set_clipboard_toggle_checked(True)
+			try:
+				val = ConfigManager.get_config_value('misc', 'include_clipboard_by_default')
+			except Exception:
+				val = None
+			self.set_clipboard_toggle_checked(True if val is None else bool(val))
 		except Exception:
 			pass
 
@@ -1698,7 +1713,8 @@ class PromptPopup(QWidget):
 	def _update_clipboard_toggle_default(self):
 		"""Update the Include checkbox default per current chat history.
 
-		Default to checked unless a prior user message starts with 'clipboard:'.
+		If the chat previously included clipboard, default to unchecked.
+		Otherwise, use config `misc.include_clipboard_by_default` (true by default).
 		"""
 		included_before = False
 		try:
@@ -1711,7 +1727,15 @@ class PromptPopup(QWidget):
 		except Exception:
 			included_before = False
 		self._clipboard_ever_included_in_current_chat = included_before
-		self.set_clipboard_toggle_checked(False if included_before else True)
+		if included_before:
+			self.set_clipboard_toggle_checked(False)
+			return
+		# Use config default when clipboard has not been used before in this chat
+		try:
+			val = ConfigManager.get_config_value('misc', 'include_clipboard_by_default')
+		except Exception:
+			val = None
+		self.set_clipboard_toggle_checked(True if val is None else bool(val))
 
 	def is_clipboard_toggle_checked(self) -> bool:
 		"""Return whether the 'Include' checkbox is currently checked."""
@@ -1847,6 +1871,26 @@ class PromptPopup(QWidget):
 			actions.addWidget(btn_copy)
 			actions.addWidget(btn_delete)
 			actions.addStretch(1)
+			inner.addLayout(actions)
+		# For user messages, add a compact actions row (copy, delete), aligned right
+		else:
+			actions = QHBoxLayout()
+			actions.setContentsMargins(0, 2, 0, 0)
+			actions.setSpacing(4)
+			# Add stretch first so buttons sit on the right side
+			actions.addStretch(1)
+			btn_copy = QToolButton(bubble)
+			btn_copy.setText("⧉")
+			btn_copy.setToolTip("Copy message")
+			btn_copy.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_copy.clicked.connect(lambda _=None, t=text: self._copy_text_to_clipboard(t))
+			btn_delete = QToolButton(bubble)
+			btn_delete.setText("🗑")
+			btn_delete.setToolTip("Delete message")
+			btn_delete.setStyleSheet("QToolButton { color: #B5B9C0; background: transparent; border: none; font-size: 12px; padding: 0px; border-radius: 4px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; } QToolButton:hover { color: #E8EAED; background: rgba(255,255,255,0.10); } QToolButton:pressed { color: #FFFFFF; background: rgba(255,255,255,0.16); }")
+			btn_delete.clicked.connect(lambda _=None, cid=int(self._current_chat_id) if self._current_chat_id is not None else 0, mid=int(message_id or 0), cont=container: self._delete_message_and_update_ui(cid, mid, cont, text))
+			actions.addWidget(btn_copy)
+			actions.addWidget(btn_delete)
 			inner.addLayout(actions)
 		if is_user:
 			h.addStretch(1)
