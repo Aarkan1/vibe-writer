@@ -6,6 +6,9 @@ from chat_db import ChatDB
 import threading
 from llm_helper import generate_with_llm
 import re
+from notes_db import NotesDB
+from ui.notes_sidebar import NotesSidebar
+from ui.note_detail_panel import NoteDetailPanel
 
 
 class TypingIndicatorWidget(QWidget):
@@ -126,12 +129,27 @@ class PromptPopup(QWidget):
 		self.sidebar_toggle_btn.clicked.connect(lambda: self._toggle_sidebar())
 		self.chats_label = QLabel("Chats")
 		self.chats_label.setStyleSheet("color: #DDE2E7; font-size: 12px;")
+		# Simple tabs: Chats / Notes
+		self.tab_chats_btn = QToolButton(self.sidebar)
+		self.tab_chats_btn.setText("Chats")
+		self.tab_chats_btn.setCheckable(True)
+		self.tab_chats_btn.setChecked(True)
+		self.tab_chats_btn.setStyleSheet("QToolButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 6px; padding: 2px 6px; font-size: 11px; } QToolButton:checked { color: #E8EAED; background: rgba(255,255,255,0.12); }")
+		self.tab_chats_btn.clicked.connect(lambda: self._switch_mode('chats'))
+		self.tab_notes_btn = QToolButton(self.sidebar)
+		self.tab_notes_btn.setText("Notes")
+		self.tab_notes_btn.setCheckable(True)
+		self.tab_notes_btn.setStyleSheet("QToolButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 6px; padding: 2px 6px; font-size: 11px; } QToolButton:checked { color: #E8EAED; background: rgba(255,255,255,0.12); }")
+		self.tab_notes_btn.clicked.connect(lambda: self._switch_mode('notes'))
 		self.new_chat_btn = QToolButton(self.sidebar)
 		self.new_chat_btn.setText("+ New")
 		self.new_chat_btn.setStyleSheet("QToolButton { color: #B5B9C0; background: rgba(255,255,255,0.06); border: 1px solid #3A4048; border-radius: 6px; padding: 2px 6px; font-size: 11px; }")
 		self.new_chat_btn.clicked.connect(lambda: self._create_new_chat())
 		top_row.addWidget(self.sidebar_toggle_btn)
 		top_row.addWidget(self.chats_label)
+		# Tabs next to label
+		top_row.addWidget(self.tab_chats_btn)
+		top_row.addWidget(self.tab_notes_btn)
 		top_row.addStretch(1)
 		top_row.addWidget(self.new_chat_btn)
 		side_v.addLayout(top_row)
@@ -188,6 +206,12 @@ class PromptPopup(QWidget):
 		# Animation handle kept as a field to avoid garbage collection.
 		self._sidebar_anim = None
 		side_v.addWidget(self.chat_list, 1)
+		# Notes sidebar (hidden by default; shown in Notes mode)
+		self.notes_sidebar = NotesSidebar(self.sidebar)
+		self.notes_sidebar.note_selected.connect(self._on_note_selected)
+		self.notes_sidebar.new_note_created.connect(self._on_note_created)
+		self.notes_sidebar.setVisible(False)
+		side_v.addWidget(self.notes_sidebar, 1)
 
 		# --- Right Content: existing popup UI in a container ---
 		right_container = QWidget(self)
@@ -316,6 +340,11 @@ class PromptPopup(QWidget):
 		self.messages_layout.addWidget(self._messages_spacer)
 		self.messages_scroll.setWidget(self.messages_widget)
 		layout.addWidget(self.messages_scroll, stretch=1)
+		# Notes detail panel (hidden by default; shown in Notes mode)
+		self.notes_panel = NoteDetailPanel(right_container)
+		self.notes_panel.request_sidebar_refresh.connect(lambda: self.notes_sidebar.refresh())
+		self.notes_panel.setVisible(False)
+		layout.addWidget(self.notes_panel, stretch=1)
 		# Typing indicator (three dots); hidden by default, positioned above the clipboard preview
 		self.loader = TypingIndicatorWidget()
 		self.loader.hide()
@@ -422,6 +451,8 @@ class PromptPopup(QWidget):
 		self._streaming_bubble = None
 		self._streaming_container = None
 		self._streaming_text = ''
+		# Current mode: 'chats' or 'notes'
+		self._current_mode = 'chats'
 
 		# Track whether clipboard has ever been included as a chat message in the current chat
 		self._clipboard_ever_included_in_current_chat = False
@@ -455,6 +486,89 @@ class PromptPopup(QWidget):
 		try:
 			ChatDB.initialize()
 			self._load_chats_and_select_latest()
+		except Exception:
+			pass
+		# Ensure notes database is initialized
+		try:
+			NotesDB.initialize()
+		except Exception:
+			pass
+
+	def _switch_mode(self, mode: str):
+		"""Switch between 'chats' and 'notes' modes, toggling relevant UI."""
+		mode = 'notes' if (mode or '').lower().startswith('n') else 'chats'
+		self._current_mode = mode
+		# Toggle tab button checks
+		try:
+			self.tab_chats_btn.setChecked(mode == 'chats')
+			self.tab_notes_btn.setChecked(mode == 'notes')
+		except Exception:
+			pass
+		# Sidebar widgets
+		try:
+			self.chat_search_input.setVisible(mode == 'chats')
+			self.chat_list.setVisible(mode == 'chats')
+			self.notes_sidebar.setVisible(mode == 'notes')
+		except Exception:
+			pass
+		# Right side widgets
+		try:
+			is_chats = (mode == 'chats')
+			self.messages_scroll.setVisible(is_chats)
+			self.loader.setVisible(is_chats and self.loader.isVisible())
+			self.clipboard_frame.setVisible(False if not is_chats else self.clipboard_frame.isVisible())
+			# Always keep header row present but hide the clipboard header row in notes mode
+			for i in range(self.layout().count() if hasattr(self, 'layout') else 0):
+				pass  # defensive; layout managed explicitly below
+			self.notes_panel.setVisible(not is_chats)
+			# Clipboard header row is a QHBoxLayout, cannot hide directly; hide its widgets
+			try:
+				for idx in range(self.clipboard_header_row.count()):
+					w = self.clipboard_header_row.itemAt(idx).widget()
+					if w is not None:
+						w.setVisible(is_chats)
+			except Exception:
+				pass
+		except Exception:
+			pass
+		# Update hint text
+		try:
+			if mode == 'notes':
+				self.hint_label.setText("Notes mode. Enter/Ctrl+Enter: add item • Shift+Enter: newline • Esc: cancel")
+				try:
+					self.text_edit.setPlaceholderText("Add a checklist item…")
+				except Exception:
+					pass
+			else:
+				self.hint_label.setText("Type instructions. Enter: preview • Ctrl+Enter: paste • Shift+Enter: newline • Esc: cancel")
+				try:
+					self.text_edit.setPlaceholderText("Write your instructions…")
+				except Exception:
+					pass
+		except Exception:
+			pass
+
+	def _on_note_selected(self, note_id: int):
+		"""Open the selected note in the detail panel and switch to notes mode."""
+		try:
+			self._switch_mode('notes')
+			self.notes_panel.set_note_id(int(note_id or 0))
+		except Exception:
+			pass
+
+	def _on_note_created(self, note_id: int):
+		"""Handle creation of a new note: open it immediately."""
+		self._on_note_selected(note_id)
+
+	def _try_add_item_to_active_checklist(self, text: str):
+		"""Append an item to the active checklist in the current note (notes mode)."""
+		if not text:
+			return
+		try:
+			cid = int(self.notes_panel.active_checklist_id() if self.notes_panel else 0)
+			if cid:
+				NotesDB.add_item(cid, text)
+				self.notes_panel.set_note_id(int(self.notes_panel._note_id))
 		except Exception:
 			pass
 
@@ -799,6 +913,11 @@ class PromptPopup(QWidget):
 			# Ctrl+Enter: submit/paste
 			if mods & Qt.ControlModifier:
 				text = self.text_edit.toPlainText().strip()
+				if self._current_mode == 'notes':
+					# In notes mode, treat Ctrl+Enter as quick-add item to active checklist
+					self._try_add_item_to_active_checklist(text)
+					self.text_edit.clear()
+					return
 				self.submitted.emit(text)
 				return
 			# Ignore Alt/Meta modified Enter
@@ -806,6 +925,11 @@ class PromptPopup(QWidget):
 				return
 			# Preview for plain Enter
 			text = self.text_edit.toPlainText().strip()
+			if self._current_mode == 'notes':
+				# In notes mode, Enter adds to active checklist as well
+				self._try_add_item_to_active_checklist(text)
+				self.text_edit.clear()
+				return
 			self.preview_requested.emit(text)
 			return
 		elif event.key() == Qt.Key_Escape:
@@ -833,6 +957,10 @@ class PromptPopup(QWidget):
 				# Ctrl+Enter → submit/paste
 				if mods & Qt.ControlModifier:
 					text = self.text_edit.toPlainText().strip()
+					if self._current_mode == 'notes':
+						self._try_add_item_to_active_checklist(text)
+						self.text_edit.clear()
+						return True
 					self.submitted.emit(text)
 					return True
 				# Ignore Alt/Meta modified Enter (no action)
@@ -840,6 +968,10 @@ class PromptPopup(QWidget):
 					return True
 				# Plain Enter → preview
 				text = self.text_edit.toPlainText().strip()
+				if self._current_mode == 'notes':
+					self._try_add_item_to_active_checklist(text)
+					self.text_edit.clear()
+					return True
 				self.preview_requested.emit(text)
 				return True
 			if key == Qt.Key_Escape:
