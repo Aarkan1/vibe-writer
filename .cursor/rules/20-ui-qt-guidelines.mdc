@@ -1,0 +1,11 @@
+---
+globs: src/ui/*.py
+---
+### Qt UI rules
+
+- **Threading**: Only touch widgets on the UI thread. Cross thread via `pyqtSignal`/slots.
+- **Defer work**: Use `QTimer.singleShot(0, ...)` to defer UI updates; avoid blocking calls.
+- **Handlers**: Keep event handlers small; move heavy logic to helpers in `src/` or dedicated UI components.
+- **Structure**: Large widgets (e.g., [prompt_popup.py](mdc:src/ui/prompt_popup.py)) should be split into sub-widgets/util modules when growing.
+- **Config**: Read settings via `ConfigManager` (see [utils.py](mdc:src/utils.py)); reflect changes in [settings_window.py](mdc:src/ui/settings_window.py).
+- **Assets**: Use icons/images from [assets/](mdc:assets). `main.py` already sets HiDPI scaling; do not duplicate.

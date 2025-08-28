@@ -1,0 +1,15 @@
+---
+alwaysApply: true
+---
+### Quick test checklist (run after meaningful changes)
+
+- Run: `python run.py`.
+- Settings: Open settings, save, restart; verify config persists.
+- Hotkeys: Test paste mode and prompt mode activation/deactivation.
+- Prompt mode: Copy selection → speak prompt → verify LLM output replaces selection.
+- Inline popup: Trigger inline prompt UI; test preview and streaming result.
+- Status/tray: Verify status messages and tray actions work.
+- Edge cases: No microphone, no sound libs, empty clipboard, long outputs, high-DPI screens.
+- Exit/restart: Ensure clean shutdown; no orphaned threads.
+
+Keep edits minimal. Add comments explaining the change and how to test it.

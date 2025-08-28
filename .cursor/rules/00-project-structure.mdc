@@ -1,0 +1,19 @@
+---
+alwaysApply: true
+---
+### Project structure overview
+
+- **Entry**: [run.py](mdc:run.py) launches [src/main.py](mdc:src/main.py), which constructs `VibeWriterApp` and the UI.
+- **UI**: All windows live in [src/ui/](mdc:src/ui/): [main_window.py](mdc:src/ui/main_window.py), [settings_window.py](mdc:src/ui/settings_window.py), [status_window.py](mdc:src/ui/status_window.py), [prompt_popup.py](mdc:src/ui/prompt_popup.py).
+- **Hotkeys & input**: [key_listener.py](mdc:src/key_listener.py) registers/handles hotkeys. Text output is injected via [input_simulation.py](mdc:src/input_simulation.py).
+- **Audio & transcription**: Background work runs in [result_thread.py](mdc:src/result_thread.py), using [transcription.py](mdc:src/transcription.py). Sound libs are optional.
+- **LLM routing**: High-level helpers are in [llm_helper.py](mdc:src/llm_helper.py), which call [openai_helper.py](mdc:src/openai_helper.py) or [openrouter_helper.py](mdc:src/openrouter_helper.py).
+- **Config**: Centralized in `ConfigManager` inside [utils.py](mdc:src/utils.py), with schema in [config_schema.yaml](mdc:src/config_schema.yaml).
+- **Data**: Local DB and helpers (e.g., [chat_db.py](mdc:src/chat_db.py)) support persistence/history.
+- **Assets**: Images/icons/audio in [assets/](mdc:assets).
+
+### Conventions
+
+- Keep UI logic inside `src/ui/`. Keep non-UI logic in `src/`.
+- Use Qt signals to cross thread boundaries; never touch Qt widgets from worker threads.
+- Read configuration only via `ConfigManager` to keep behavior consistent across UI and workers.

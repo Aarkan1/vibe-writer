@@ -1,0 +1,15 @@
+---
+globs: src/*.py,src/ui/*.py
+---
+### Configuration
+
+- **Access**: Use `ConfigManager.get_config_value(...)` and `get_config_section(...)` from [utils.py](mdc:src/utils.py); avoid direct env reads.
+- **Schema**: When adding config, update [config_schema.yaml](mdc:src/config_schema.yaml) with defaults, types, and help text, and surface it in [settings_window.py](mdc:src/ui/settings_window.py).
+- **Lifecycle**: Call `ConfigManager.initialize()` early (see [src/main.py](mdc:src/main.py)). Use `restart_app` to apply config safely.
+
+### LLM routing
+
+- **High-level**: Call `generate_with_llm`/`stream_with_llm` from [llm_helper.py](mdc:src/llm_helper.py).
+- **Providers**: Provider-specific logic stays in [openai_helper.py](mdc:src/openai_helper.py) and [openrouter_helper.py](mdc:src/openrouter_helper.py).
+- **Local vs API**: Respect `model_options.use_api`; when false, use local model via [transcription.py](mdc:src/transcription.py).
+- **Sanitization**: Always pass text through `sanitize_text_for_output` before typing/pasting (in [utils.py](mdc:src/utils.py)).

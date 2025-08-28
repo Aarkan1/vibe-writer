@@ -1,0 +1,17 @@
+---
+globs: *.py
+---
+### Python style guide
+
+- **Simplicity first**: Write small, clear functions. Prefer pure functions and immutable locals.
+- **File size**: Keep files focused; target <200 lines. If larger, split into modules.
+- **Naming**: Use clear, consistent names. Keep functions short and single-purpose.
+- **Types & docs**: Add type hints and concise docstrings where helpful.
+- **Side effects**: Avoid module-level side effects; perform setup in functions/classes.
+- **Comments**: Add helpful, explanatory comments. Do not delete old comments unless wrong/obsolete.
+- **Logging/prints**: Prefer `ConfigManager.console_print(...)` for user-visible logs.
+
+### Qt/UI safety
+
+- Do not block the UI thread. Avoid `time.sleep` or long loops in UI code.
+- Use signals/slots to communicate from workers to UI. Keep UI handlers minimal.

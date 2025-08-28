@@ -1,0 +1,12 @@
+---
+globs: src/**/*.py
+---
+### Concurrency, audio, and I/O
+
+- **Workers**: Run audio and network work in threads (see [result_thread.py](mdc:src/result_thread.py)). Never update UI directly from workers.
+- **Signals**: Emit signals for status, previews, deltas, and final results (see [src/main.py](mdc:src/main.py) for `inline*` signals).
+- **Clipboard**: Use `pyperclip` with Qt clipboard fallback (pattern in [src/main.py](mdc:src/main.py)).
+- **Typing/Paste**: Use [input_simulation.py](mdc:src/input_simulation.py) instead of OS-specific calls.
+- **Audio**: Guard imports for `sounddevice`/`soundfile`. Operate safely when unavailable (pattern in [src/main.py](mdc:src/main.py)).
+- **Blocking**: Replace sleeps in UI code with timers. If sleeping in workers, keep durations short.
+- **Cancellation**: Thread work should support cancellation (events/flags) and clean shutdown on exit.
